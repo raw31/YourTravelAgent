@@ -1,0 +1,16 @@
+# core (URL-param extraction — the Phase-1 MVP path)
+requests>=2.31
+lxml>=5.0
+
+# LLM extraction
+openai>=1.40            # text: Groq / Grok / OpenAI (all OpenAI-compatible)
+google-genai>=0.3       # image / PDF uploads: Gemini vision
+python-dotenv>=1.0      # loads YourTravelAgent/.env
+# anthropic>=0.40       # optional: LLM_PROVIDER=anthropic (text + vision)
+
+# optional browser enrichment (MMT price/name/room; Booking/Agoda DOM)
+#   pip install playwright && playwright install chromium
+# playwright>=1.44
+
+# dev
+pytest>=8.0

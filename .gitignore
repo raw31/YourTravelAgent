@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+captured_responses.json
+*.html
+
+data/
+*.db
+*.db-journal
+*.db-wal

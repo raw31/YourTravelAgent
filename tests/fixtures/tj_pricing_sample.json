@@ -1,0 +1,54 @@
+{
+  "correlationId": "1p6IYhwDQ9NGwiZ8FaigQz",
+  "tjHotelId": "10000000012345",
+  "hotelName": "Pride Plaza Hotel Aerocity New Delhi",
+  "nationality": "106",
+  "reviewHash": "abc123def456",
+  "options": [
+    {
+      "optionId": "db35a71a-4577-4740-8706-7d32e4c2ca4e",
+      "optionType": "SRSM",
+      "roomInfo": [
+        { "id": "10019446051", "name": "Deluxe, 2 Twin", "adults": 2, "children": 1 },
+        { "id": "10019446051", "name": "Deluxe, 2 Twin", "adults": 2, "children": 1 }
+      ],
+      "inclusions": [],
+      "mealBasis": "Breakfast",
+      "bookingNotes": "Must print on screen.",
+      "pricing": {
+        "totalPrice": 27806.62, "basePrice": 25000.00, "discount": 0,
+        "taxes": 2500.00, "mf": 250.62, "mft": 56.00, "currency": "INR",
+        "strikethrough": 31000.00
+      },
+      "commercial": { "type": "COMMISSIONABLE", "commission": 1800.0 },
+      "compliance": { "gstType": "PASSTHROUGH", "panRequired": true, "passportRequired": false },
+      "cancellation": {
+        "isRefundable": true,
+        "penalties": [
+          { "from": "2026-08-01T00:00:00", "to": "2026-09-18T23:59:59", "amount": 0 },
+          { "from": "2026-09-18T23:59:59", "to": "2026-09-21T00:00:00", "amount": 27759.42 }
+        ]
+      }
+    },
+    {
+      "optionId": "77c0d1aa-1111-2222-3333-444455556666",
+      "optionType": "SRSM",
+      "roomInfo": [
+        { "id": "10019446051", "name": "Deluxe, 2 Twin", "adults": 2, "children": 1 },
+        { "id": "10019446051", "name": "Deluxe, 2 Twin", "adults": 2, "children": 1 }
+      ],
+      "inclusions": [],
+      "mealBasis": "Room Only",
+      "pricing": {
+        "totalPrice": 24000.00, "basePrice": 24000.00, "discount": 0,
+        "taxes": 0, "mf": 0, "mft": 0, "currency": "INR"
+      },
+      "commercial": { "type": "NET", "commission": 0 },
+      "compliance": { "gstType": "NA", "panRequired": false, "passportRequired": false },
+      "cancellation": { "isRefundable": false, "penalties": [
+        { "from": "2026-08-01T00:00:00", "to": "2026-09-21T00:00:00", "amount": 24000.00 }
+      ] }
+    }
+  ],
+  "status": { "success": true }
+}

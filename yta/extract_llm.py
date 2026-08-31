@@ -1,0 +1,207 @@
+"""LLM extraction layer — one path for every OTA.
+
+Input: the booking URL (+ its query params) and, when available, the page
+content (rendered text + JSON-LD + captured API responses, or pasted
+text/HTML, or uploaded screenshots / PDF).
+
+Output: a dict of packet fields, human-readable NAMES prioritised, plus a
+per-room `occupancy` array. The model parses the OTA URL params itself
+(date formats, occupancy encodings) and cross-checks against the page.
+
+Provider/model come from `yta.llm` (Groq for text, Gemini for images/PDF).
+"""
+from __future__ import annotations
+
+import json
+import re
+
+from yta import llm
+
+SYSTEM = """You read a hotel booking / review page from an Online Travel Agency
+— it may be given as rendered page text, or as screenshot image(s) or a PDF
+of the page — and return a single JSON object describing the exact stay the
+user is about to book.
+
+MANDATORY FIELDS — the request is a FAILURE unless every one of these is
+found. Search BOTH the URL parameters and the page hard for each:
+  1. hotel.name                    — the real hotel display name
+  2. stay.check_in, stay.check_out — the exact stay dates
+  3. stay.rooms                    — number of rooms
+  4. stay.occupancy                — the per-room adults/children/ages breakdown
+  5. requested_offer.room_name     — the selected room type
+  6. room detail — ANY of requested_offer.description / bed_type / view
+     (whatever the page shows about the room; don't force a prose blurb)
+  7. ota_benchmark.final_payable   — the all-in total price
+Only use null when the content genuinely does not contain the value — never
+invent one — but treat a null in these as "extraction failed", not "fine".
+
+Return ONLY this JSON shape:
+
+{
+  "hotel": {
+    "name": string|null,            // the hotel's real display name, e.g. "Aloha on the Ganges"
+    "address": string|null,         // full street / area address as shown
+    "city": string|null,            // just the city
+    "country": string|null,         // just the country (e.g. "India") — infer from the address/domain if not labelled
+    "star_rating": number|null,     // 1-5 if shown
+    "lat": number|null,             // latitude, from a URL param or the page/map
+    "lng": number|null              // longitude
+  },
+  "stay": {
+    "check_in": "YYYY-MM-DD"|null,
+    "check_out": "YYYY-MM-DD"|null,
+    "rooms": integer|null,               // total number of rooms
+    "adults": integer|null,              // total adults across all rooms
+    "children": integer|null,            // total children across all rooms
+    "occupancy": [                       // ONE entry per room, in the page's order
+      {"adults": integer, "children": integer, "child_ages": [integer]}
+    ] | null                            // null if the page never splits guests by room
+  },
+  "requested_offer": {
+    "room_name": string|null,       // the selected room type, e.g. "One Bedroom Standard Apartment (Garden Facing)"
+    "description": string|null,     // short room description if present
+    "bed_type": string|null,
+    "view": string|null,
+    "meal_plan": string|null,       // e.g. "Breakfast included", "Room only", "Half board"
+    "cancellation": string|null,    // the policy TEXT as shown, e.g. "Free cancellation until 5 Sep 2026", "Non-refundable"
+    "payment_terms": string|null    // e.g. "Pay now", "Pay at the property", "Book now, pay later"
+  },
+  "ota_benchmark": {
+    "subtotal": number|null,
+    "taxes": number|null,
+    "fees": number|null,
+    "discount": number|null,
+    "final_payable": number|null,   // the ALL-IN total the guest pays
+    "currency": string|null         // ISO code: INR, USD, EUR, ...
+  },
+  "field_confidence": { "<dotted.path>": 0.0-1.0 },   // for every non-null field above
+  "contradicts_url": [ "<dotted.path>: url said X, page shows Y", ... ]
+}
+
+You are also given the BOOKING URL and its query parameters. OTA URLs encode
+a lot of the booking directly — use them, and cross-check against the page
+when the page is readable.
+
+READING OTA URL PARAMETERS
+- Dates: `checkin` / `checkout` may be ISO (2026-09-21) or 8 digits.
+  8-digit MakeMyTrip dates are MMDDYYYY (09032026 -> 2026-09-03). Booking.com
+  uses ISO. If a page is also given and shows dates, the page wins.
+- Occupancy — decode to a per-room `occupancy` array:
+  * Booking.com: one `room1`,`room2`,... param each. "A,A" = 2 adults;
+    "A,A,7" = 2 adults + 1 child aged 7.
+  * MakeMyTrip `roomStayQualifier`: a flat "e"-separated stream, repeated
+    per room -> adults, children, <one age per child>, adults, children, ...
+    "2e1e3e2e1e2e" = Room 1: 2 adults + 1 child age 3 ; Room 2: 2 adults +
+    1 child age 2. `rsc` is the aggregate "rooms e adults e children e ages".
+  * Agoda `/book/` URLs: `roomName` param = the room name; `isBreakfastIncluded`
+    (false -> "Room only"); `isEasyCancel` (false -> "Non-refundable").
+    The `roomToken` param is a ";"-separated k:v blob — parse `sai:<number>`
+    as ota_benchmark.final_payable and `rcy:<code>` as currency; `h:<id>` is
+    the Agoda hotel id (NOT the name). A `nr0=<n>` param can give the room
+    count. Agoda `/book/` URLs contain NO dates, NO hotel name and NO clean
+    occupancy — those must come from the page; if there is no page content,
+    leave them null and the request will be flagged as a failure.
+- Price: Booking.com `rt_selected_total_price`; Agoda `roomToken` `sai:`.
+  These are numbers only.
+- `_uCurrency` / `roomToken` `rcy:` give the currency.
+- Coordinates: look hard for them in the URL and the page. Param names vary —
+  `lat`/`latitude` + `lng`/`lon`/`long`/`longitude`, or a single `ll` / `geo` /
+  `latlng` / `location` / `center` param holding "lat,lng", or an `@lat,lng` in
+  a maps link. Latitude is -90..90, longitude -180..180. Put them in
+  hotel.lat / hotel.lng.
+
+RULES
+- Use ONLY facts visible in the provided content or encoded in the URL.
+  Never guess, never fill in typical/default values. Unknown => null.
+- Names must be the real human-readable names shown on the page. Do NOT
+  output internal IDs, slugs, or codes as names.
+- hotel.address must be the COMPLETE address exactly as printed — every
+  part: building/street, area, city, state/region, country and postcode.
+  Do NOT keep only the first line or the neighbourhood. Join multi-line
+  addresses with ", ". Then also fill hotel.city and hotel.country from it.
+- Money: numbers only (no currency symbols, no thousands separators).
+  final_payable is the final all-in amount, not a per-night or pre-tax figure.
+- Dates as YYYY-MM-DD. If the page shows only a weekday/day-month, combine
+  with the year in context; if you cannot be sure of the year, use null.
+- occupancy: for a multi-room booking give the per-room split exactly as
+  shown ("Room 1: 2 adults", "Room 2: 2 adults, 1 child age 3"). child_ages
+  lists one age per child when the page states them, else [].
+- If the page shows a different value than the URL_HINTS below, still
+  report what the PAGE shows and add an entry to "contradicts_url".
+- Output ONLY the JSON object. No markdown, no commentary."""
+
+_FIELDS = [
+    "hotel.name", "hotel.address", "hotel.city", "hotel.country",
+    "hotel.star_rating", "hotel.lat", "hotel.lng",
+    "stay.check_in", "stay.check_out", "stay.rooms", "stay.adults", "stay.children",
+    "stay.occupancy",
+    "requested_offer.room_name", "requested_offer.description",
+    "requested_offer.bed_type", "requested_offer.view",
+    "requested_offer.meal_plan", "requested_offer.cancellation",
+    "requested_offer.payment_terms",
+    "ota_benchmark.subtotal", "ota_benchmark.taxes", "ota_benchmark.fees",
+    "ota_benchmark.discount", "ota_benchmark.final_payable", "ota_benchmark.currency",
+]
+
+
+def _dig(d: dict, path: str):
+    cur = d
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+class LLMExtractionResult:
+    def __init__(self, fields: dict, confidence: dict, contradictions: list,
+                 provider: str, model: str, raw: str = ""):
+        self.fields = fields                # {dotted_path: value}
+        self.confidence = confidence        # {dotted_path: float}
+        self.contradictions = contradictions
+        self.provider = provider
+        self.model = model
+        self.raw = raw
+
+
+def extract(context: str | None = None, url: str = "",
+            media: list | None = None,
+            provider: str | None = None) -> LLMExtractionResult:
+    from urllib.parse import urlparse, parse_qs
+
+    url_block = ""
+    if url:
+        q = parse_qs(urlparse(url).query, keep_blank_values=True)
+        params = "\n".join(f"  {k} = {v[0]!r}" for k, v in q.items() if v and v[0])
+        url_block = (f"=== BOOKING URL ===\n{url}\n\nquery parameters:\n"
+                     f"{params or '  (none)'}\n\n")
+
+    if media:
+        user = (url_block + "=== PAGE CONTENT ===\nThe page is attached as "
+                "image(s) / a PDF below. Read every visible field.")
+        if context:
+            user += f"\n\nAdditional text context:\n{context}"
+    else:
+        user = url_block + f"=== PAGE CONTENT ===\n{context or '(none — rely on the URL)'}"
+
+    raw, provider, model = llm.complete(SYSTEM, user, max_tokens=1800,
+                                        media=media, provider=provider)
+
+    raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
+    data = json.loads(raw)   # let a bad parse raise — caller handles
+
+    conf_in = data.get("field_confidence", {}) or {}
+    fields, confidence = {}, {}
+    for path in _FIELDS:
+        val = _dig(data, path)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            continue
+        fields[path] = val
+        c = conf_in.get(path)
+        confidence[path] = float(c) if isinstance(c, (int, float)) else 0.6
+
+    return LLMExtractionResult(
+        fields=fields, confidence=confidence,
+        contradictions=list(data.get("contradicts_url", []) or []),
+        provider=provider, model=model, raw=raw,
+    )
