@@ -385,8 +385,9 @@ function render_resolution(rz) {
         ${rm.refundable_filter!=null ? '· '+(rm.refundable_filter?'refundable':'non-refundable') : ''}</div>`;
     if (rm.view_flag)
       head += `<div class="muted" style="margin-bottom:6px">⚑ ${esc(rm.view_flag)}</div>`;
-    if (rm.notes && rm.notes.length)
-      head += `<ul class="warn-list">${rm.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+    const rmNotes = (rm.notes||[]).filter(n => n !== rm.view_flag);
+    if (rmNotes.length)
+      head += `<ul class="warn-list">${rmNotes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
     if ((rm.rate_options||[]).length) {
       head += `<table><tr><th>optionId</th><th>room</th><th>meal</th><th>total</th><th>tags</th></tr>
         ${rm.rate_options.map(o=>`<tr>

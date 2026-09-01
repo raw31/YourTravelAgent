@@ -32,6 +32,19 @@ from yta.roommap.meal import meal_to_tj, meal_rank
 # the default matching policy (mirrors yta.schema.DEFAULT_MATCHING_POLICY)
 _DEFAULT_POLICY = {"meal": "same_or_better", "cancellation": "same_or_better"}
 
+# most-specific bed keyword wins — OTAs write "1 extra-large double bed (King)"
+# where the real bed is King and "double" is just a size descriptor
+_BED_PRIORITY = ("king", "queen", "twin", "double", "single", "sofabed",
+                 "bunkbed", "rollaway")
+
+
+def _bed_kw(text: str | None) -> str:
+    if not text:
+        return ""
+    toks = set(re.findall(r"[a-z]+", text.lower()))
+    return next((b for b in _BED_PRIORITY if b in toks), "")
+
+
 _PERKS = [
     (re.compile(r"hi[\s-]?tea", re.I), "hi-tea"),
     (re.compile(r"\bspa\b", re.I), "spa"),
@@ -216,8 +229,9 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
     if not q_view and getattr(offer, "view", None):
         q_view = offer.view
     q_aug = q_base
-    if getattr(offer, "bed_type", None):
-        q_aug = f"{q_base} {offer.bed_type}"
+    bed_kw = _bed_kw(getattr(offer, "bed_type", None))
+    if bed_kw and bed_kw not in q_base.lower():
+        q_aug = f"{q_base} {bed_kw}"
 
     scored: list[RoomBucket] = []
     for rtid, brows in buckets_rows.items():
