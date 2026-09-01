@@ -66,52 +66,62 @@ OPTIONS = [
 ]
 
 
-def test_map_rooms_strong_match_and_ratekey():
+def test_map_rooms_returns_every_option_of_the_matched_room():
     off = Offer(room_name="Deluxe Villa", meal_plan="Half Board", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)
-    assert r.matched and r.band == "strong"
-    assert r.room_type_id == "R1"
-    # ratekey collision (Deluxe Villa vs Deluxe Villa Hi-Tea, same meal+refund)
-    assert {ro.option_id for ro in r.rate_options} == {"o2", "o3"}
-    cheapest = [ro for ro in r.rate_options if "cheapest" in ro.tags]
-    assert len(cheapest) == 1 and cheapest[0].option_id == "o3"
-    assert any("perk:hi-tea" in ro.tags for ro in r.rate_options)
+    assert r.matched and r.band == "strong" and r.room_type_id == "R1"
+    # ALL four R1 options come back, nothing dropped by meal / cancellation
+    assert {ro.option_id for ro in r.rate_options} == {"o1", "o2", "o3", "o4"}
+    # rate-plan matches (Half-Board-or-better + refundable) are o2, o3
+    assert set(r.ratekey_option_ids) == {"o2", "o3"}
+    # rate-plan matches sort first, then by price
+    assert [ro.option_id for ro in r.rate_options][:2] == ["o3", "o2"]
+    o3 = next(ro for ro in r.rate_options if ro.option_id == "o3")
+    assert "ratekey-match" in o3.tags and "meal:exact" in o3.tags
+    assert "perk:hi-tea" in o3.tags
+    o1 = next(ro for ro in r.rate_options if ro.option_id == "o1")
+    assert "meal:lower" in o1.tags and "ratekey-match" not in o1.tags
+    # cheapest across the whole room is o4 (38000)
+    o4 = next(ro for ro in r.rate_options if ro.option_id == "o4")
+    assert "cheapest" in o4.tags
 
 
 def test_map_rooms_bed_type_disambiguates():
     off = Offer(room_name="Deluxe Villa", bed_type="King", meal_plan="Room Only",
                 refundable=False)
-    r = map_rooms(OPTIONS, off, use_llm=False, policy={"meal": "exact",
-                                                       "cancellation": "exact"})
-    assert r.room_type_id == "R2"                # King bed -> R2, not plain R1
-    assert [ro.option_id for ro in r.rate_options] == ["o6"]
+    r = map_rooms(OPTIONS, off, use_llm=False,
+                  policy={"meal": "exact", "cancellation": "exact"})
+    assert r.room_type_id == "R2"                 # King bed -> R2, not plain R1
+    assert {ro.option_id for ro in r.rate_options} == {"o5", "o6"}
+    assert r.ratekey_option_ids == ["o6"]         # Room Only + non-refundable
 
 
 def test_map_rooms_cancellation_same_or_better():
-    # booked non-refundable -> a free-cancellation rate is an upgrade, kept + tagged
     off = Offer(room_name="Deluxe Villa", bed_type="King", meal_plan="Room Only",
                 refundable=False)
     r = map_rooms(OPTIONS, off, use_llm=False)          # default same_or_better
     assert r.room_type_id == "R2"
     o5 = next(ro for ro in r.rate_options if ro.option_id == "o5")
     assert "cancel:better" in o5.tags
+    # a free-cancellation rate satisfies a non-refundable request under the policy
+    assert set(r.ratekey_option_ids) == {"o5", "o6"}
 
 
 def test_map_rooms_no_match_returns_ranked_buckets():
     off = Offer(room_name="Overwater Bungalow", meal_plan="Breakfast", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)
     assert not r.matched and r.room_type_id is None
+    assert not r.rate_options
     assert r.ranked_buckets and r.ranked_buckets[0].score < 0.85
 
 
-def test_map_rooms_meal_fallback_when_absent():
+def test_map_rooms_no_ratekey_match_still_lists_all_options():
     off = Offer(room_name="Executive Villa", meal_plan="All Inclusive", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)
     assert r.matched and r.room_type_id == "R4"
-    # R4 has no All Inclusive -> filter drops, all meals shown, note added
-    assert r.meal_filter is None
-    assert any("no 'All Inclusive'" in n for n in r.notes)
-    assert [ro.option_id for ro in r.rate_options] == ["o9"]
+    assert [ro.option_id for ro in r.rate_options] == ["o9"]   # the only R4 option
+    assert r.ratekey_option_ids == []                          # o9 is Breakfast, below AI
+    assert "meal:lower" in r.rate_options[0].tags
 
 
 def test_map_rooms_view_flagged_and_ignored():
@@ -124,23 +134,23 @@ def test_map_rooms_view_flagged_and_ignored():
 
 def test_map_rooms_benchmark_tag():
     off = Offer(room_name="Premier Villa", meal_plan="Room Only", refundable=True)
-    r = map_rooms(OPTIONS, off, benchmark_price=46200, use_llm=False,
-                  policy={"meal": "exact"})
-    assert [ro.option_id for ro in r.rate_options] == ["o8"]
-    assert "matches-benchmark" in r.rate_options[0].tags
+    r = map_rooms(OPTIONS, off, benchmark_price=46200, use_llm=False)
+    o8 = next(ro for ro in r.rate_options if ro.option_id == "o8")
+    assert "matches-benchmark" in o8.tags
+    assert {ro.option_id for ro in r.rate_options} == {"o7", "o8"}
 
 
-def test_map_rooms_meal_same_or_better():
-    # booked Room Only -> a Breakfast rate is an upgrade and is kept + tagged
+def test_map_rooms_meal_same_or_better_tags():
     off = Offer(room_name="Premier Villa", meal_plan="Room Only", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)              # default same_or_better
-    ids = [ro.option_id for ro in r.rate_options]
-    assert ids == ["o8", "o7"]                              # cheapest first
-    better = next(ro for ro in r.rate_options if ro.option_id == "o7")
-    assert "meal:better" in better.tags
-    # exact policy keeps only the Room Only rate
+    assert {ro.option_id for ro in r.rate_options} == {"o7", "o8"}
+    assert set(r.ratekey_option_ids) == {"o7", "o8"}        # Room-Only-or-better
+    o7 = next(ro for ro in r.rate_options if ro.option_id == "o7")
+    assert "meal:better" in o7.tags
+    # exact policy -> only the Room Only rate is a ratekey match
     r2 = map_rooms(OPTIONS, off, use_llm=False, policy={"meal": "exact"})
-    assert [ro.option_id for ro in r2.rate_options] == ["o8"]
+    assert r2.ratekey_option_ids == ["o8"]
+    assert {ro.option_id for ro in r2.rate_options} == {"o7", "o8"}   # still all listed
 
 
 def test_map_rooms_accepts_supplier_options():
@@ -149,4 +159,5 @@ def test_map_rooms_accepts_supplier_options():
     off = Offer(room_name="Deluxe Villa", meal_plan="Breakfast", refundable=True)
     r = map_rooms(sopts, off, use_llm=False, policy={"meal": "exact"})
     assert r.matched and r.room_type_id == "R1"
-    assert [ro.option_id for ro in r.rate_options] == ["o1"]
+    assert {ro.option_id for ro in r.rate_options} == {"o1", "o2", "o3", "o4"}
+    assert r.ratekey_option_ids == ["o1"]

@@ -388,15 +388,39 @@ function render_resolution(rz) {
     const rmNotes = (rm.notes||[]).filter(n => n !== rm.view_flag);
     if (rmNotes.length)
       head += `<ul class="warn-list">${rmNotes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+    // ── TripJack results for the matched room_type_id (on top) ──
     if ((rm.rate_options||[]).length) {
-      head += `<table><tr><th>optionId</th><th>room</th><th>meal</th><th>total</th><th>tags</th></tr>
-        ${rm.rate_options.map(o=>`<tr>
+      const rk = new Set(rm.ratekey_option_ids||[]);
+      head += `<div class="muted" style="margin:10px 0 4px">TripJack — all ${rm.rate_options.length} option(s) for this room type${rk.size ? ' · '+rk.size+' match the requested rate plan (highlighted)' : ''}</div>`;
+      head += `<table><tr><th>optionId</th><th>room</th><th>meal</th><th>refund</th><th>total</th><th>tags</th></tr>
+        ${rm.rate_options.map(o=>`<tr${rk.has(o.option_id) ? ' style="background:rgba(74,170,110,.16)"' : ''}>
           <td class="mono">${esc((o.option_id||'').slice(0,8))}</td>
           <td>${esc(o.room_name)}</td>
           <td>${esc(o.meal_basis)}</td>
+          <td>${o.refundable ? 'yes' : 'no'}</td>
           <td class="mono">${esc(o.currency)} ${o.total_price}</td>
           <td class="muted">${(o.tags||[]).map(esc).join(', ')}</td></tr>`).join('')}
         </table>`;
+    }
+    // ── our price (OTA benchmark) underneath, for comparison ──
+    if (rm.our_price) {
+      const p = rm.our_price, cur = esc(p.currency||'');
+      const rows = [['Room', esc(p.room_name||'—')],
+        ['Meal / cancel', esc([p.meal_plan, p.cancellation].filter(Boolean).join(' · ')||'—')]];
+      if (p.subtotal!=null) rows.push(['Subtotal', cur+' '+p.subtotal]);
+      if (p.taxes!=null) rows.push(['Taxes', cur+' '+p.taxes]);
+      if (p.discount!=null) rows.push(['Discount', cur+' '+p.discount]);
+      rows.push(['Final payable', '<b>'+cur+' '+p.final_payable+'</b>']);
+      let delta = '';
+      const rkOpts = (rm.rate_options||[]).filter(o=>(rm.ratekey_option_ids||[]).includes(o.option_id));
+      if (rkOpts.length && p.final_payable) {
+        const best = Math.min(...rkOpts.map(o=>o.total_price));
+        const diff = best - p.final_payable, pct = diff/p.final_payable*100;
+        delta = `<div class="muted" style="margin-top:6px">best matching TripJack rate <span class="mono">${cur} ${best}</span> —
+          <span class="mono" style="color:${diff<=0?'#4a4':'#c66'}">${diff<=0?'':'+'}${cur} ${Math.round(diff)} (${pct>=0?'+':''}${pct.toFixed(1)}%)</span> vs our price</div>`;
+      }
+      head += `<div class="muted" style="margin:12px 0 4px">Our price (OTA benchmark)</div>
+        <table>${rows.map(kv=>`<tr><td>${kv[0]}</td><td class="mono">${kv[1]}</td></tr>`).join('')}</table>${delta}`;
     }
     head += `<details><summary>all ${(rm.ranked_buckets||[]).length} room-type buckets (ranked)</summary>
       <table><tr><th>room_type_id</th><th>best-matched name</th><th>score</th><th>band</th><th>#opt</th></tr>
@@ -537,7 +561,17 @@ def _resolve(packet) -> dict:
                             det.options, packet.requested_offer,
                             benchmark_price=packet.ota_benchmark.final_payable,
                             policy=packet.matching_policy, log=packet.log)
-                        d["room_map"] = rm.to_dict()
+                        rmd = rm.to_dict()
+                        b = packet.ota_benchmark
+                        rmd["our_price"] = {
+                            "final_payable": b.final_payable, "subtotal": b.subtotal,
+                            "taxes": b.taxes, "fees": b.fees, "discount": b.discount,
+                            "currency": b.currency,
+                            "room_name": packet.requested_offer.room_name,
+                            "meal_plan": packet.requested_offer.meal_plan,
+                            "cancellation": packet.requested_offer.cancellation,
+                        }
+                        d["room_map"] = rmd
                         packet.log(
                             f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
                             f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"

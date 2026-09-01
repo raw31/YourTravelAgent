@@ -94,11 +94,12 @@ class RoomMapResult:
     score: float | None
     rate_options: list                 # list[RateOption] — all surviving, tagged
     ranked_buckets: list               # list[RoomBucket] — every bucket, best first
-    meal_filter: str | None            # TJ mealBasis we filtered on
-    refundable_filter: bool | None
+    meal_filter: str | None            # requested meal, as a TJ mealBasis value
+    refundable_filter: bool | None     # requested refundable flag
     view_flag: str | None
     llm_used: bool
     notes: list = field(default_factory=list)
+    ratekey_option_ids: list = field(default_factory=list)  # options that match the rate plan
 
     def to_dict(self):
         d = asdict(self)
@@ -311,69 +312,80 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
             notes.append(view_flag)
             _log(f"  view: {view_flag}")
 
-    # 5. meal + refundable filter — honour the matching policy
+    # 5. keep EVERY option of the matched room_type_id — meal / cancellation
+    #    are annotated, never used to drop a row.
     sel = list(buckets_rows[chosen.room_type_id])
-    tj_meal = meal_to_tj(offer.meal_plan)
-    meal_pol = pol["meal"]
-    if tj_meal:
-        want = meal_rank(tj_meal)
-        if meal_pol == "same_or_better":
-            keep = [r for r in sel if meal_rank(r["meal_basis"]) >= want]
-        else:
-            keep = [r for r in sel if r["meal_basis"] == tj_meal]
-        if keep:
-            sel = keep
-        else:
-            notes.append(f"no {tj_meal!r}"
-                         f"{'-or-better' if meal_pol == 'same_or_better' else ''} "
-                         f"option for this room — showing all meal plans")
-            tj_meal = None
-    _log(f"  meal filter [{meal_pol}]: {offer.meal_plan!r} -> {tj_meal!r}  ({len(sel)} left)")
+    req_meal = meal_to_tj(offer.meal_plan)
+    req_rank = meal_rank(req_meal) if req_meal else -1
+    req_ref = offer.refundable
+    meal_pol, canc_pol = pol["meal"], pol["cancellation"]
 
-    ref_filter = offer.refundable
-    canc_pol = pol["cancellation"]
-    if offer.refundable is not None:
-        if offer.refundable is False and canc_pol == "same_or_better":
-            # a free-cancellation rate is an upgrade over a non-refundable
-            # request — keep everything, tag the upgrades below
-            keep = sel
-        else:
-            keep = [r for r in sel if r["refundable"] == offer.refundable]
-        if keep:
-            sel = keep
-        else:
-            notes.append(f"no {'refundable' if offer.refundable else 'non-refundable'} "
-                         f"option for this room/meal — showing all")
-            ref_filter = None
-    _log(f"  cancellation filter [{canc_pol}]: {offer.refundable} -> {len(sel)} option(s)")
+    def _ratekey_ok(r) -> bool:
+        """Does this option satisfy the requested rate plan under the policy?"""
+        if req_meal:
+            rr = meal_rank(r["meal_basis"])
+            if meal_pol == "same_or_better":
+                if rr < req_rank:
+                    return False
+            elif rr != req_rank:
+                return False
+        if req_ref is not None:
+            if req_ref and not r["refundable"]:
+                return False                       # they wanted free cancellation
+            if not req_ref and r["refundable"] is False:
+                pass
+            if not req_ref and r["refundable"] and canc_pol == "exact":
+                return False
+        return True
 
-    # 6. tag + return all
-    want_meal = meal_rank(meal_to_tj(offer.meal_plan)) if offer.meal_plan else -1
     cheapest = min((r["total_price"] for r in sel), default=None)
-    rate_options = []
-    for r in sorted(sel, key=lambda r: r["total_price"]):
+    rate_options, ratekey_ids = [], []
+    for r in sel:
         tags = ["refundable" if r["refundable"] else "non-refundable"]
+        rr = meal_rank(r["meal_basis"])
+        if req_meal:
+            if r["meal_basis"] == req_meal:
+                tags.append("meal:exact")
+            elif rr > req_rank:
+                tags.append("meal:better")
+            elif rr >= 0:
+                tags.append("meal:lower")
+        if req_ref is not None and r["refundable"] == req_ref:
+            tags.append("cancel:exact")
+        elif req_ref is False and r["refundable"]:
+            tags.append("cancel:better")       # free cancellation upgrade
+        ok = _ratekey_ok(r)
+        if ok:
+            tags.append("ratekey-match")
+            ratekey_ids.append(r["option_id"])
         if cheapest is not None and r["total_price"] == cheapest:
             tags.append("cheapest")
         if benchmark_price and benchmark_price > 0 \
                 and abs(r["total_price"] - benchmark_price) / benchmark_price <= 0.02:
             tags.append("matches-benchmark")
-        if want_meal >= 0 and meal_rank(r["meal_basis"]) > want_meal:
-            tags.append("meal:better")
-        if offer.refundable is False and r["refundable"]:
-            tags.append("cancel:better")
         tags += [f"perk:{p}" for p in _perks(r["room_name"])]
-        rate_options.append(RateOption(
+        rate_options.append((ok, RateOption(
             option_id=r["option_id"], room_type_id=r["room_type_id"],
             room_name=r["room_name"], meal_basis=r["meal_basis"],
             refundable=r["refundable"], total_price=r["total_price"],
-            currency=r["currency"], tags=tags))
+            currency=r["currency"], tags=tags)))
+
+    # rate-plan matches first, then by price
+    rate_options.sort(key=lambda t: (not t[0], t[1].total_price))
+    rate_options = [ro for _, ro in rate_options]
+
+    notes.append(f"{len(sel)} option(s) for room_type_id {chosen.room_type_id}"
+                 + (f" — {len(ratekey_ids)} match the requested rate plan "
+                    f"(meal {req_meal}"
+                    + (f", {'refundable' if req_ref else 'non-refundable'}" if req_ref is not None else "")
+                    + ")" if req_meal or req_ref is not None else ""))
+    _log(f"  {len(sel)} option(s) for the matched room; {len(ratekey_ids)} match the rate plan")
 
     return RoomMapResult(
         matched=True, room_type_id=chosen.room_type_id, band=band,
         score=chosen.score, rate_options=rate_options, ranked_buckets=scored,
-        meal_filter=tj_meal, refundable_filter=ref_filter, view_flag=view_flag,
-        llm_used=llm_used, notes=notes)
+        meal_filter=req_meal, refundable_filter=req_ref, view_flag=view_flag,
+        llm_used=llm_used, notes=notes, ratekey_option_ids=ratekey_ids)
 
 
 def _dump_buckets(buckets_rows, svc) -> list:
