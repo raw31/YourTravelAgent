@@ -85,6 +85,22 @@ def test_json_digest_request_payload_tagged_and_first():
     assert d.index("rooms[0].adults") < d.index("hotelName")
 
 
+def test_json_digest_three_channel_ordering():
+    xhr = [
+        {"url": "r", "kind": "response", "body": {"pricing": {"totalPrice": 30780}}},
+        {"url": "e", "kind": "embedded",
+         "body": {"booking": {"checkIn": "2026-09-24",
+                              "rooms": [{"adults": 2, "children": 1}]}}},
+        {"url": "q", "kind": "request",
+         "body": {"roomOccupancies": [{"numAdults": 2, "numChildren": 1}]}},
+    ]
+    d = _json_digest(xhr, 3000)
+    order = [ln.split()[0] for ln in d.splitlines()]
+    assert order.index("[req]") < order.index("[embed]") < order.index("[resp]")
+    assert "[embed] booking.checkIn = 2026-09-24" in d
+    assert "[req] roomOccupancies[0].numAdults = 2" in d
+
+
 def test_json_digest_drops_enum_values_not_real_words():
     xhr = [{"url": "x", "kind": "response", "body": {
         "cancellationCharges": "MERGE_LOCAL_COUPON_DATA",   # enum -> drop

@@ -27,8 +27,16 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 _WS = re.compile(r"[ \t ]+")
 _BLANKS = re.compile(r"\n{3,}")
-_MAX_XHR = 18
+_MAX_XHR = 22
 _MAX_XHR_BYTES = 60_000
+# an "API" URL — worth capturing the query string of a GET to one
+_API_URL = re.compile(r"(?i)/(api|graphql|gql|bff|mapi|rest|v\d|orchestrator|"
+                      r"gateway|service)[/?]|\.(json|api)\b")
+# embedded page-state dumps a SPA leaves in the HTML
+_STATE_SCRIPT = re.compile(
+    r"(?:window\.)?(?:__NEXT_DATA__|__INITIAL_STATE__|__PRELOADED_STATE__|"
+    r"__APOLLO_STATE__|__NUXT__|__data|__INITIAL_DATA__|__REDUX_STATE__|"
+    r"__STATE__)\s*=\s*(\{.*?\})\s*[;<]", re.S)
 
 
 class RenderUnavailable(RuntimeError):
@@ -57,13 +65,13 @@ class RenderResult:
         if self.xhr_json:
             digest = _json_digest(self.xhr_json, max_digest)
             parts += ["", "CAPTURED API DATA (booking-relevant fields from the "
-                      "JSON the page's own API calls sent and received. Lines "
-                      "tagged [req] are the REQUEST payload — the OTA's exact "
-                      "machine statement of what is being booked (rooms, per-room "
-                      "adults/children/ages, dates, hotel id): trust these most. "
-                      "[resp] lines are the returned detail — per-room guest "
-                      "split, price breakup, cancellation rules kept behind a "
-                      "click on the visible page):",
+                      "JSON the OTA's own page produced. [req] = a REQUEST "
+                      "payload / API query — the OTA's exact machine statement "
+                      "of what is being booked (rooms, per-room adults/children/"
+                      "ages, dates, hotel id): trust these most. [embed] = "
+                      "state the page embedded in its HTML. [resp] = returned "
+                      "detail (per-room guest split, price breakup, cancellation "
+                      "rules often hidden behind a click):",
                       digest]
         return "\n".join(parts)
 
@@ -147,12 +155,12 @@ def _json_digest(xhr_list: list, max_chars: int) -> str:
             for i, v in enumerate(node[:80]):
                 walk(v, f"{path}[{i}]", tag, base)
 
+    _kind = {"request": ("[req]", 0), "embedded": ("[embed]", 1)}
     for blob in xhr_list:
-        is_req = blob.get("kind") == "request"
-        # request payloads are the OTA's own structured statement of the
-        # booking — float them above response bodies
-        walk(blob.get("body"), "", "[req]" if is_req else "[resp]",
-             base=0 if is_req else 2)
+        # request payloads = the OTA's own structured statement of the booking;
+        # embedded SPA state next; response bodies last
+        tag, base = _kind.get(blob.get("kind"), ("[resp]", 2))
+        walk(blob.get("body"), "", tag, base)
 
     keep.sort(key=lambda t: t[0])                 # priority lines first, stable
     return "\n".join(line for _, line in keep)[:max_chars]
@@ -184,6 +192,56 @@ _EXPAND_JS = r"""
   return n;
 }
 """
+
+
+def _scan_embedded_state(page, res) -> None:
+    """Pull SPA state dumps out of <script> tags: __NEXT_DATA__ and friends,
+    plus every `<script type="application/json">` block. Whatever parses and
+    carries booking-shaped keys is added as an `embedded` source."""
+    seen = 0
+    # a) typed json blocks (Next.js, some CMSs)
+    for node in page.query_selector_all(
+            'script[type="application/json"], script[id="__NEXT_DATA__"]'):
+        if seen >= 4 or len(res.xhr_json) >= _MAX_XHR:
+            break
+        try:
+            raw = node.inner_text()
+            if not raw or len(raw) > _MAX_XHR_BYTES:
+                continue
+            body = json.loads(raw)
+            if _looks_bookingish(body):
+                res.xhr_json.append({"url": "embedded:script-json",
+                                     "kind": "embedded", "body": body})
+                seen += 1
+        except Exception:
+            pass
+    # b) `window.__X__ = {…}` assignments in inline scripts
+    if seen < 4 and len(res.xhr_json) < _MAX_XHR:
+        try:
+            html = page.content() or ""
+        except Exception:
+            html = ""
+        for m in _STATE_SCRIPT.finditer(html):
+            if seen >= 4 or len(res.xhr_json) >= _MAX_XHR:
+                break
+            blob = m.group(1)
+            if len(blob) > _MAX_XHR_BYTES:
+                continue
+            try:
+                body = json.loads(blob)
+            except Exception:
+                continue
+            if _looks_bookingish(body):
+                res.xhr_json.append({"url": "embedded:window-state",
+                                     "kind": "embedded", "body": body})
+                seen += 1
+
+
+def _looks_bookingish(obj) -> bool:
+    blob = json.dumps(obj, default=str)[:20000].lower() if obj else ""
+    return sum(k in blob for k in (
+        "room", "adult", "child", "occup", "checkin", "check_in", "guest",
+        "price", "hotel", "night", "cancel")) >= 3
 
 
 def _require_playwright():
@@ -287,26 +345,28 @@ def render(url: str, *,
             pass
 
     def _on_request(req):
-        # the OTA's own API calls carry the booking config in their POST body —
-        # rooms[], per-room adults/children/childAges, dates, hotel id. That is
-        # the single cleanest occupancy source. Capture it.
+        # the OTA's own API calls carry the booking config — the POST body, or
+        # the query string of an API GET (rooms[], per-room adults/children/
+        # childAges, dates, hotel id). The single cleanest occupancy source.
         if len(res.xhr_json) >= _MAX_XHR:
             return
         try:
-            if req.method not in ("POST", "PUT", "PATCH"):
-                return
             if not keep(req.url):
                 return
-            raw = req.post_data
-            if not raw or len(raw) > _MAX_XHR_BYTES:
-                return
-            raw = raw.strip()
             body = None
-            if raw[:1] in "{[":
-                body = json.loads(raw)
-            elif "=" in raw and "&" in raw:                # form-encoded
-                from urllib.parse import parse_qs
-                body = {k: v[0] for k, v in parse_qs(raw).items()}
+            if req.method in ("POST", "PUT", "PATCH"):
+                raw = (req.post_data or "").strip()
+                if not raw or len(raw) > _MAX_XHR_BYTES:
+                    return
+                if raw[:1] in "{[":
+                    body = json.loads(raw)
+                elif "=" in raw and "&" in raw:            # form-encoded
+                    from urllib.parse import parse_qs
+                    body = {k: v[0] for k, v in parse_qs(raw).items()}
+            elif req.method == "GET" and "?" in req.url and _API_URL.search(req.url):
+                from urllib.parse import parse_qs, urlparse
+                qs = parse_qs(urlparse(req.url).query)
+                body = {k: (v[0] if len(v) == 1 else v) for k, v in qs.items()}
             if isinstance(body, (dict, list)) and body:
                 res.xhr_json.append({"url": req.url.split("?")[0],
                                      "kind": "request", "body": body})
@@ -361,9 +421,20 @@ def render(url: str, *,
                 res.json_ld.append(json.loads(node.inner_text()))
             except Exception:
                 pass
+
+        # embedded page-state JSON — SPAs (__NEXT_DATA__, __APOLLO_STATE__,
+        # redux/nuxt dumps, bare application/json blocks) often carry the whole
+        # structured booking even when no XHR fires. Generic: no per-OTA keys.
+        try:
+            _scan_embedded_state(page, res)
+        except Exception:
+            pass
+
         _nreq = sum(1 for x in res.xhr_json if x.get("kind") == "request")
-        step(f"captured {len(res.xhr_json) - _nreq} API response(s) + "
-             f"{_nreq} request payload(s), {len(res.json_ld)} JSON-LD block(s)")
+        _nemb = sum(1 for x in res.xhr_json if x.get("kind") == "embedded")
+        step(f"captured {len(res.xhr_json) - _nreq - _nemb} API response(s) + "
+             f"{_nreq} request payload(s) + {_nemb} embedded state block(s), "
+             f"{len(res.json_ld)} JSON-LD block(s)")
 
         text = ""
         if content_selector:
