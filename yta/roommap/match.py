@@ -109,6 +109,15 @@ class RoomMapResult:
                                for b in self.ranked_buckets]
         return d
 
+    def best_option(self):
+        """The option to prebook: cheapest rate-plan match, else cheapest
+        option of the matched room. None when nothing matched."""
+        if not self.rate_options:
+            return None
+        pool = [o for o in self.rate_options
+                if o.option_id in (self.ratekey_option_ids or [])] or self.rate_options
+        return min(pool, key=lambda o: o.total_price)
+
 
 # -- option-row adapter (accepts raw TJ dicts or SupplierOption) ----------
 

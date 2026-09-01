@@ -163,11 +163,16 @@ class TripJackClient:
         return self._post("hms", self.PRICING_PATH, self.pricing_body(**kw),
                           body_key="options")
 
+    REVIEW_PATH = "/hms/v3/hotel/review"
+
     def review(self, *, correlation_id, option_id, review_hash, hid) -> dict:
-        return self._post("hms", "/hms/v3/hotel/review", {
+        """Prebook / revalidation. Re-confirms live price + availability and
+        returns a bookingId. Does NOT hold inventory or book — that is the
+        (unimplemented, deliberately) Book step."""
+        return self._post("hms", self.REVIEW_PATH, {
             "correlationId": correlation_id, "optionId": option_id,
             "reviewHash": review_hash, "hid": str(hid),
-        })
+        }, body_key="option")
 
     def static_detail(self, hid) -> dict:
         return self._post("hms", "/hms/v3/hotel/static-detail", {"hid": str(hid)})

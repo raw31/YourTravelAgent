@@ -277,6 +277,7 @@ function render(d) {
 
   html += resolution_hotel(d.resolution);
   html += resolution_roommap(d.resolution);
+  html += resolution_prebook(d.resolution);
 
   if (p.warnings.length) html += `<section><h2>Warnings — ${p.warnings.length}</h2>
     <div class="body"><ul class="warn-list">${p.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div></section>`;
@@ -423,6 +424,44 @@ function resolution_roommap(rz) {
       <td class="mono">${b.score}</td><td class="muted">${esc(b.band)}</td>
       <td class="mono">${b.n_options}</td></tr>`).join('')}
     </table></details>`;
+  return h + `</div></section>`;
+}
+
+// ── 4. Prebook (Review) — revalidate + bookingId, NO Book ─────────
+function resolution_prebook(rz) {
+  if (!rz || !rz.available) return '';
+  if (rz.review_error)
+    return `<section><h2>Prebook (Review)</h2><div class="body muted">Review call failed: ${esc(rz.review_error)}</div></section>`;
+  if (!rz.review) return '';
+  const rv = rz.review, o = rv.option || {};
+  const roomName = (o.rooms||[]).map(r=>r.name).join(' + ') || '—';
+  const cur = esc(o.currency || (rz.room_map && rz.room_map.our_price ? rz.room_map.our_price.currency : '') || '');
+  let h = `<section><h2>Prebook (Review)
+      <span class="band ${rv.booking_id ? 'band-high' : 'band-none'}">${rv.booking_id ? 'revalidated' : 'no bookingId'}</span></h2><div class="body">`;
+  h += `<div class="grid">
+    <div>bookingId</div><div class="mono" style="font-size:14px">${val(rv.booking_id)}</div>
+    <div>optionId</div><div class="mono">${esc((o.option_id||'').slice(0,8))}</div>
+    <div>Room / meal</div><div>${esc(roomName)} <span class="muted">· ${esc(o.meal_basis||'')}</span></div>
+    <div>Confirmed price</div><div class="mono">${cur} ${val(o.total_price)}
+      ${rv.price_changed ? `<span class="mono" style="color:#c66">(moved ${rv.price_delta>=0?'+':''}${rv.price_delta} vs pricing)</span>`
+        : '<span class="muted">(held — same as pricing)</span>'}</div>
+    <div>Refundable</div><div>${o.refundable ? 'yes' : 'no'}${o.free_cancel_until ? ' <span class="muted">· free until '+esc(o.free_cancel_until)+'</span>' : ''}</div>
+    <div>On-hold allowed</div><div>${rv.onhold_allowed ? 'yes' : 'no'}${rv.deadline ? ' <span class="muted">· deadline '+esc(rv.deadline)+'</span>' : ''}</div>
+  </div>`;
+  if (rz.room_map && rz.room_map.our_price && rz.room_map.our_price.final_payable && o.total_price) {
+    const op = rz.room_map.our_price.final_payable, diff = o.total_price - op, pct = diff/op*100;
+    h += `<div class="muted" style="margin-top:8px">vs our price ${cur} ${op}:
+      <span class="mono" style="color:${diff<=0?'#4a4':'#c66'}">${diff<=0?'':'+'}${cur} ${Math.round(diff)} (${pct>=0?'+':''}${pct.toFixed(1)}%)</span></div>`;
+  }
+  if (rv.notes && rv.notes.length)
+    h += `<ul class="warn-list" style="margin-top:8px">${rv.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+  h += `<div class="status status-ok" style="margin-top:10px">Stops here — no Book / Hold call is made.</div>`;
+  if (o.booking_notes)
+    h += `<details><summary>booking notes</summary><pre class="raw">${esc(o.booking_notes)}</pre></details>`;
+  if (rz.review_request)
+    h += `<details><summary>Review request — POST ${esc(rz.review_request.url)}</summary>
+      <pre class="raw">${esc(JSON.stringify(rz.review_request.body, null, 2))}</pre></details>`;
+  h += `<details><summary>raw review response</summary><pre class="raw">${esc(JSON.stringify(rv, null, 2))}</pre></details>`;
   return h + `</div></section>`;
 }
 
@@ -590,6 +629,27 @@ def _resolve(packet) -> dict:
                             f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
                             f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"
                             + ("; LLM used" if rm.llm_used else ""))
+
+                        # prebook: Review the best matching option (no Book)
+                        pick = rm.best_option() if rm.matched else None
+                        if pick:
+                            try:
+                                from yta.tripjack.hotel import review_from_detail, review_request
+                                d["review_request"] = review_request(
+                                    m.tj_id, pick.option_id, det.review_hash,
+                                    correlation_id=det.correlation_id)
+                                t3 = time.perf_counter()
+                                rv = review_from_detail(det, pick.option_id, client=client)
+                                rms = round((time.perf_counter() - t3) * 1000, 1)
+                                d["review"] = rv.to_dict()
+                                packet.log(
+                                    f"prebook (Review) → bookingId {rv.booking_id}"
+                                    + (f"; price {rv.price_delta:+.2f}" if rv.price_changed else "; price held")
+                                    + f"; onhold={rv.onhold_allowed}  [{rms} ms]"
+                                    + "  — NO Book call made")
+                            except TripJackError as e:
+                                d["review_error"] = str(e)
+                                packet.log(f"prebook (Review) error: {e}")
             except TripJackError as e:
                 d["detail_error"] = str(e)
                 packet.log(f"TripJack pricing error: {e}")

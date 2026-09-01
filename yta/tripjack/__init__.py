@@ -14,7 +14,9 @@ Spec: docs/tripjack-api-v3.md
 from yta.tripjack.client import TripJackClient, TripJackError
 from yta.tripjack.hotel import (hotel_options, pricing_request,
                                 pricing_request_from_packet, SupplierDetail,
-                                SupplierOption)
+                                SupplierOption, ReviewResult, review_option,
+                                review_request, review_from_detail)
 
 __all__ = ["TripJackClient", "TripJackError", "hotel_options", "pricing_request",
-           "pricing_request_from_packet", "SupplierDetail", "SupplierOption"]
+           "pricing_request_from_packet", "SupplierDetail", "SupplierOption",
+           "ReviewResult", "review_option", "review_request", "review_from_detail"]

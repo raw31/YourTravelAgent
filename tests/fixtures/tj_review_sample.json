@@ -1,0 +1,32 @@
+{
+  "status": { "success": true, "httpStatus": 200 },
+  "correlationId": "cd6ea95e85f6439083e5de6049e287ff",
+  "bookingId": "TJ2092185633018",
+  "hotelId": "100000297299",
+  "hotelName": "The Roseate Ganges",
+  "onholdAllowed": "true",
+  "option": {
+    "optionId": "8623d156-75d7-4888-b5f9-42f5c3283125",
+    "optionType": "SRSM",
+    "roomInfo": [
+      { "id": "10024737797", "name": "DELUXE, VILLA, KING BED", "adults": 2, "children": 0 }
+    ],
+    "inclusions": [],
+    "mealBasis": "Breakfast",
+    "bookingNotes": "Mandatory fees: Deposit INR 10000.0 per stay.",
+    "pricing": {
+      "totalPrice": 41200.00, "basePrice": 41176.40, "discount": 0.0,
+      "taxes": 0.0, "mf": 20.0, "mft": 3.6, "currency": "INR"
+    },
+    "commercial": { "type": "COMMISSIONABLE", "commission": 0.0 },
+    "compliance": { "gstType": "NA", "panRequired": false, "passportRequired": false },
+    "cancellation": {
+      "isRefundable": true,
+      "penalties": [
+        { "from": "2026-09-01T11:58:00", "to": "2026-11-08T09:59:59", "amount": 0.0 },
+        { "from": "2026-11-08T09:59:59", "to": "2026-11-16T00:00:00", "amount": 38665.84 }
+      ]
+    },
+    "deadlineDateTime": "2026-11-08T09:59:59"
+  }
+}

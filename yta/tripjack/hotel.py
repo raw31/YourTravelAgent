@@ -210,3 +210,101 @@ def hotel_options(tj_id, check_in: str, check_out: str, occupancy, *,
             result.notes.append(
                 "no bookable options match this occupancy / date range")
     return result
+
+
+# -- Review / prebook (POST /hms/v3/hotel/review) --------------
+
+REVIEW_URL = "https://hms-search.tripjack.com/hms/v3/hotel/review"
+
+
+@dataclass
+class ReviewResult:
+    """The prebook / revalidation step. Confirms live price + availability for
+    one option and hands back a `booking_id` to carry into Book."""
+    tj_id: str
+    hotel_name: str | None
+    booking_id: str | None
+    correlation_id: str
+    option: SupplierOption | None            # the re-validated option
+    onhold_allowed: bool
+    deadline: str | None                     # deadlineDateTime — book/hold before this
+    booking_notes: str | None
+    price_changed: bool                      # vs the price we quoted from pricing
+    price_delta: float                       # review.total - expected (signed)
+    expected_price: float | None
+    notes: list = field(default_factory=list)
+    raw: dict | None = None
+
+    def to_dict(self):
+        d = asdict(self)
+        d["option"] = self.option.to_dict() if isinstance(self.option, SupplierOption) \
+            else self.option
+        d.pop("raw", None)
+        return d
+
+
+def review_request(tj_id, option_id: str, review_hash: str, *,
+                   correlation_id: str | None = None) -> dict:
+    """Build the exact POST /hms/v3/hotel/review request — no client, no
+    network. Returns {method, url, headers, body}."""
+    return {
+        "method": "POST",
+        "url": REVIEW_URL,
+        "headers": {"apikey": "<TRIPJACK_API_KEY>",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"},
+        "body": {
+            "correlationId": correlation_id or uuid.uuid4().hex,
+            "optionId": option_id,
+            "reviewHash": review_hash,
+            "hid": str(tj_id),
+        },
+    }
+
+
+def review_option(tj_id, option_id: str, review_hash: str, *,
+                  correlation_id: str | None = None,
+                  expected_price: float | None = None,
+                  client: TripJackClient | None = None) -> ReviewResult:
+    """Call POST /hms/v3/hotel/review for one option and normalise the result.
+    `correlation_id` MUST be the one used for the pricing call that produced
+    `option_id` / `review_hash`."""
+    client = client or TripJackClient.from_env()
+    corr = correlation_id or uuid.uuid4().hex
+
+    resp = client.review(correlation_id=corr, option_id=option_id,
+                         review_hash=review_hash, hid=str(tj_id))
+    o = resp.get("option") or {}
+    opt = _norm_option(o) if o else None
+    total = opt.total_price if opt else 0.0
+    delta = round(total - expected_price, 2) if expected_price is not None else 0.0
+    changed = expected_price is not None and abs(delta) >= 0.01
+
+    r = ReviewResult(
+        tj_id=str(tj_id), hotel_name=resp.get("hotelName") or resp.get("name"),
+        booking_id=resp.get("bookingId"), correlation_id=corr, option=opt,
+        onhold_allowed=str(resp.get("onholdAllowed")).lower() == "true",
+        deadline=o.get("deadlineDateTime"),
+        booking_notes=o.get("bookingNotes"),
+        price_changed=changed, price_delta=delta, expected_price=expected_price,
+        raw=resp)
+    if changed:
+        r.notes.append(
+            f"price moved {delta:+.2f} between pricing and review "
+            f"({expected_price:.2f} → {total:.2f})")
+    if not r.booking_id:
+        r.notes.append("review returned no bookingId — cannot proceed to Book")
+    return r
+
+
+def review_from_detail(detail: SupplierDetail, option_id: str, *,
+                       client: TripJackClient | None = None) -> ReviewResult:
+    """Review one option straight off a SupplierDetail (reuses its
+    correlation_id + review_hash, and the quoted price for drift detection)."""
+    if not detail.review_hash:
+        raise ValueError("SupplierDetail has no review_hash — cannot Review")
+    quoted = next((o.total_price for o in detail.options
+                   if getattr(o, "option_id", None) == option_id), None)
+    return review_option(
+        detail.tj_id, option_id, detail.review_hash,
+        correlation_id=detail.correlation_id, expected_price=quoted, client=client)

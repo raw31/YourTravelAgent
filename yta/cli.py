@@ -36,6 +36,8 @@ def main(argv=None) -> int:
                     help="skip the TripJack hotel-id lookup")
     ap.add_argument("--price", action="store_true",
                     help="on a confident match, actually POST /hms/v3/hotel/pricing")
+    ap.add_argument("--prebook", action="store_true",
+                    help="also Review (prebook) the best matching option — NO Book")
     ap.add_argument("--timeout", type=int, default=40000)
     ap.add_argument("--compact", action="store_true")
     args = ap.parse_args(argv)
@@ -107,7 +109,7 @@ def main(argv=None) -> int:
             print(f"\n# TripJack Detail request not buildable: {e}", file=sys.stderr)
             req = None
 
-        if args.price and req and tj.band in ("high", "medium"):
+        if (args.price or args.prebook) and req and tj.band in ("high", "medium"):
             from yta.tripjack.client import TripJackClient, TripJackError
             from yta.tripjack.hotel import hotel_options
             client = TripJackClient.from_env()
@@ -145,8 +147,21 @@ def main(argv=None) -> int:
                         if rm.view_flag:
                             print(f"#   ⚑ {rm.view_flag}", file=sys.stderr)
                         print(json.dumps(rm.to_dict(), indent=2, default=str))
+
+                        pick = rm.best_option() if args.prebook and rm.matched else None
+                        if pick:
+                            from yta.tripjack.hotel import review_from_detail
+                            rv = review_from_detail(det, pick.option_id, client=client)
+                            print(f"\n# ── prebook (Review) ──  bookingId {rv.booking_id}"
+                                  f"  onhold={rv.onhold_allowed}"
+                                  + (f"  price {rv.price_delta:+.2f} vs pricing" if rv.price_changed
+                                     else "  price held")
+                                  + "   — NO Book call made", file=sys.stderr)
+                            for nt in rv.notes:
+                                print(f"#   ! {nt}", file=sys.stderr)
+                            print(json.dumps(rv.to_dict(), indent=2, default=str))
                 except TripJackError as e:
-                    print(f"\n# TripJack pricing call failed: {e}", file=sys.stderr)
+                    print(f"\n# TripJack call failed: {e}", file=sys.stderr)
     return 0
 
 
