@@ -1,0 +1,28 @@
+[
+  {
+    "name": "agoda-book-token-nr0",
+    "kind": "url",
+    "url": "https://www.agoda.com/en-in/book/?masterRoomTypeId=122376291&roomToken=8b%3A0%3Bc%3A2D1N_1N%3Bcid%3A1922885%3Bh%3A336672%3Bo%3A2%3Bp%3A0%3Bmc%3A1%3Bmo%3A2%3Bsai%3A20987.24%3Brcy%3AINR&roomName=Standard+City+View+Room&isEasyCancel=false&isBreakfastIncluded=false&nr0=2",
+    "expect": [{"adults": 2, "children": 0, "child_ages": []},
+               {"adults": 2, "children": 0, "child_ages": []}],
+    "min_conf": 0.8
+  },
+  {
+    "name": "booking-book-room1-room2-asymmetric",
+    "kind": "url",
+    "url": "https://secure.booking.com/book.html?hotel_id=1194299&room1=A%2C1&room2=A%2CA%2C2&checkin=2026-09-21&interval=1&rt_selected_total_price=30780",
+    "expect": [{"adults": 1, "children": 1, "child_ages": [1]},
+               {"adults": 2, "children": 1, "child_ages": [2]}],
+    "min_conf": 0.9
+  },
+  {
+    "name": "cleartrip-itinerary-api-roomGuests",
+    "kind": "api",
+    "api_fixture": "ct_75cbaeba4b.json",
+    "expect": [{"adults": 2, "children": 1, "child_ages": [1]},
+               {"adults": 1, "children": 0, "child_ages": []}],
+    "digest_must_contain": ["roomGuests[0].adultString = 2 adults",
+                            "roomGuests[1].adultString = 1 adult",
+                            "childrenAgesString = 1 yrs"]
+  }
+]

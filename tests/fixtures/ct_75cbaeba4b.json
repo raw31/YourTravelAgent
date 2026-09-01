@@ -1,0 +1,54 @@
+{
+ "slotsData": [
+  {
+   "slotData": {
+    "type": "ITINERARY_TRIP_DETAIL",
+    "data": {
+     "roomGuestInfo": {
+      "type": "ITINERARY_ROOMS_GUESTS",
+      "data": {
+       "roomAndGuestInfo": "2 Rooms, 4 Guests",
+       "paxInfo": "3 adults, 1 child"
+      }
+     }
+    }
+   }
+  },
+  {
+   "slotData": {
+    "type": "ITINERARY_ROOM_INFO",
+    "data": {
+     "roomName": "Superior Twin Room"
+    }
+   }
+  }
+ ],
+ "subPages": {
+  "guestInfo": {
+   "slotsData": [
+    {
+     "slotData": {
+      "type": "ITINERARY_GUEST_INFO",
+      "data": {
+       "heading": "Guest information",
+       "roomGuests": [
+        {
+         "roomName": "Room 1",
+         "adultString": "2 adults",
+         "childrenString": "1 Child",
+         "childrenAgesString": "1 yrs"
+        },
+        {
+         "roomName": "Room 2",
+         "adultString": "1 adult",
+         "childrenString": "",
+         "childrenAgesString": ""
+        }
+       ]
+      }
+     }
+    }
+   ]
+  }
+ }
+}
