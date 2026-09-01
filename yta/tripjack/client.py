@@ -94,10 +94,17 @@ class TripJackClient:
             if data.get("status", {}).get("success"):
                 return data
 
-            err = data.get("error", {}) or {}
-            code = str(err.get("code") or resp.status_code)
+            # TripJack uses either {error:{code,message}} or {errors:[{errCode,message}]}
+            err = data.get("error") or {}
+            if not err and data.get("errors"):
+                e0 = data["errors"][0] or {}
+                err = {"code": e0.get("errCode") or e0.get("code"),
+                       "message": e0.get("message")}
+            code = str(err.get("code")
+                       or data.get("status", {}).get("httpStatus")
+                       or resp.status_code)
             msg = err.get("message") or "request failed"
-            rid = err.get("requestId")
+            rid = err.get("requestId") or data.get("requestId")
 
             if code in _RATE_CODES or resp.status_code == 429:
                 wait = float(resp.headers.get("Retry-After", 2 ** attempt))
