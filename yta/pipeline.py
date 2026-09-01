@@ -191,6 +191,8 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
     if used:
         pkt.source.extraction_method = f"{content_src}+llm:{'+'.join(used)}"
 
+    _resolve_occupancy(pkt, url)
+
     pkt.log("running sanity checks")
     if run_validate:
         validate(pkt)
@@ -206,6 +208,40 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
     else:
         pkt.log("result: OK — every mandatory field found")
     return pkt
+
+
+def _resolve_occupancy(pkt, url: str) -> None:
+    """Consolidate every occupancy signal — URL params/tokens, captured API
+    request payloads (via the LLM), and the LLM's own page read — into one
+    per-room list, even-splitting an aggregate when that's all there is."""
+    from yta import occupancy
+    s = pkt.stay
+    sigs = occupancy.signals_from_url(url)
+    llm_occ = [{"adults": r.adults, "children": r.children,
+                "child_ages": list(r.child_ages)} for r in (s.occupancy or [])]
+    occ, conf, src, notes = occupancy.resolve(
+        sigs, llm_rooms=s.rooms, llm_adults=s.adults, llm_children=s.children,
+        llm_occupancy=llm_occ or None)
+
+    for n in notes:
+        if n not in pkt.warnings:
+            pkt.warnings.append(n)
+
+    if not occ:
+        if sigs or llm_occ:
+            pkt.log(f"occupancy: unresolved ({src})")
+        return
+
+    before = _occ_repr(s.occupancy) if s.occupancy else "none"
+    s.set_occupancy(occ)
+    now = _occ_repr(s.occupancy)
+    tag = "assumption" if conf < 0.7 else ("url" if src.startswith("url") else "llm")
+    pkt.note("stay.occupancy", now, tag, round(conf, 2),
+             f"occupancy resolver ({src})")
+    s.occupancy_confidence = round(conf, 2)
+    s.occupancy_source = src
+    pkt.log(f"occupancy → {now}  [{src}, conf {conf:.2f}]"
+            + (f"  (was {before})" if before not in ("none", now) else ""))
 
 
 def _is_set(pkt, path: str) -> bool:

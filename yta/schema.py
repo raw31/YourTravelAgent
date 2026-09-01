@@ -94,6 +94,8 @@ class Stay:
     adults: Optional[int] = None
     children: Optional[int] = None
     child_ages: list = field(default_factory=list)
+    occupancy_confidence: Optional[float] = None      # set by the occupancy resolver
+    occupancy_source: Optional[str] = None            # "url:room1" / "even_split" / ...
 
     def set_occupancy(self, rooms_list) -> None:
         """rooms_list: list of RoomOccupancy | dict. Sets per-room occupancy

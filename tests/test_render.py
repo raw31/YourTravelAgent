@@ -64,3 +64,33 @@ def test_llm_context_no_xhr_is_fine():
     ctx = rr.llm_context()
     assert "CAPTURED API DATA" not in ctx
     assert "hello world" in ctx
+
+
+def test_json_digest_request_payload_tagged_and_first():
+    xhr = [
+        {"url": "https://ota/api/detail", "kind": "response",
+         "body": {"hotelName": "InterContinental", "pricing": {"totalPrice": 66714}}},
+        {"url": "https://ota/api/prebook", "kind": "request",
+         "body": {"checkIn": "2026-09-17", "hotelId": 336672,
+                  "rooms": [{"adults": 2, "children": 1, "childrenAges": [5]},
+                            {"adults": 2, "children": 0}]}},
+    ]
+    d = _json_digest(xhr, 4000)
+    lines = d.splitlines()
+    assert lines[0].startswith("[req]")                       # request payload floats up
+    assert "[req] rooms[0].adults = 2" in d
+    assert "[req] rooms[0].childrenAges = [5]" in d           # scalar list emitted
+    assert "[resp] hotelName = InterContinental" in d
+    # the request occupancy comes before the response detail
+    assert d.index("rooms[0].adults") < d.index("hotelName")
+
+
+def test_json_digest_drops_enum_values_not_real_words():
+    xhr = [{"url": "x", "kind": "response", "body": {
+        "cancellationCharges": "MERGE_LOCAL_COUPON_DATA",   # enum -> drop
+        "roomName": "Deluxe King",                          # real -> keep
+        "childAge": 7}}]
+    d = _json_digest(xhr, 2000)
+    assert "roomName = Deluxe King" in d
+    assert "childAge = 7" in d
+    assert "MERGE_LOCAL_COUPON_DATA" not in d

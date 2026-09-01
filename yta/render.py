@@ -41,7 +41,7 @@ class RenderResult:
     final_url: str = ""
     text: str = ""
     json_ld: list = field(default_factory=list)
-    xhr_json: list = field(default_factory=list)      # [{"url":..., "body":...}]
+    xhr_json: list = field(default_factory=list)      # [{"url", "kind":"request"|"response", "body"}]
     notes: list = field(default_factory=list)
     browser_channel: str = ""
     coords: tuple | None = None                       # (lat, lng, source) from geoscan
@@ -56,10 +56,14 @@ class RenderResult:
                       json.dumps(self.json_ld, ensure_ascii=False)[:max_json]]
         if self.xhr_json:
             digest = _json_digest(self.xhr_json, max_digest)
-            parts += ["", "CAPTURED API DATA (booking-relevant fields pulled from "
-                      "the JSON the page fetched — often carries the per-room "
-                      "guest split, child ages, price breakup and cancellation "
-                      "rules that the visible page keeps behind a click):",
+            parts += ["", "CAPTURED API DATA (booking-relevant fields from the "
+                      "JSON the page's own API calls sent and received. Lines "
+                      "tagged [req] are the REQUEST payload — the OTA's exact "
+                      "machine statement of what is being booked (rooms, per-room "
+                      "adults/children/ages, dates, hotel id): trust these most. "
+                      "[resp] lines are the returned detail — per-room guest "
+                      "split, price breakup, cancellation rules kept behind a "
+                      "click on the visible page):",
                       digest]
         return "\n".join(parts)
 
@@ -93,8 +97,9 @@ _JSON_KEEP = re.compile(
 _JSON_DROP = re.compile(
     r"(?i)coupon|voucher|supercoin|super.?coin|salutation|raventrack|"
     r"eventname|actionlist|\bcta\b|_api_call|navigate|redirect|tooltip|"
-    r"iconid|placeholder|validation|add new guest|saved guest|"
-    r"^[A-Z][A-Z0-9_]{4,}$")
+    r"iconid|placeholder|validation|add new guest|saved guest")
+# ALL-CAPS enum / action constants ("MERGE_LOCAL_COUPON_DATA", "NO_REFUND")
+_ENUM_VALUE = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
 # leaves whose path names a high-value field — surface these first
 _JSON_PRIORITY = re.compile(
     r"(?i)roomguest|occup|paxinfo|childrenages|childage|adultstring|"
@@ -112,31 +117,42 @@ def _json_digest(xhr_list: list, max_chars: int) -> str:
     keep: list[tuple[int, str]] = []
     seen: set[str] = set()
 
-    def walk(node, path):
+    def walk(node, path, tag, base):
         if isinstance(node, dict):
             for k, v in node.items():
                 kp = f"{path}.{k}" if path else str(k)
-                if isinstance(v, (dict, list)):
-                    walk(v, kp)
+                # a list of scalars (childrenAges: [5, 3]) — emit as one leaf
+                if isinstance(v, list) and v and not any(
+                        isinstance(x, (dict, list)) for x in v):
+                    v = "[" + ",".join(str(x) for x in v[:12]) + "]"
+                elif isinstance(v, (dict, list)):
+                    walk(v, kp, tag, base)
                     continue
-                if v in (None, "", "null"):
+                if v in (None, "", "null", "[]"):
                     continue
                 sv = str(v)
-                if len(sv) >= 160 or _JSON_DROP.search(kp) or _JSON_DROP.search(sv):
+                if len(sv) >= 160 or _ENUM_VALUE.match(sv):
+                    continue
+                if _JSON_DROP.search(kp) or _JSON_DROP.search(sv):
                     continue
                 if not (_JSON_KEEP.search(str(k)) or _JSON_KEEP.search(sv)):
                     continue
-                line = f"{'.'.join(kp.split('.')[-3:])} = {v}"
+                line = f"{tag} {'.'.join(kp.split('.')[-3:])} = {v}"
                 if line in seen:
                     continue
                 seen.add(line)
-                keep.append((0 if _JSON_PRIORITY.search(kp) else 1, line))
+                pri = base + (0 if _JSON_PRIORITY.search(kp) else 1)
+                keep.append((pri, line))
         elif isinstance(node, list):
-            for i, v in enumerate(node[:60]):
-                walk(v, f"{path}[{i}]")
+            for i, v in enumerate(node[:80]):
+                walk(v, f"{path}[{i}]", tag, base)
 
     for blob in xhr_list:
-        walk(blob.get("body"), "")
+        is_req = blob.get("kind") == "request"
+        # request payloads are the OTA's own structured statement of the
+        # booking — float them above response bodies
+        walk(blob.get("body"), "", "[req]" if is_req else "[resp]",
+             base=0 if is_req else 2)
 
     keep.sort(key=lambda t: t[0])                 # priority lines first, stable
     return "\n".join(line for _, line in keep)[:max_chars]
@@ -265,7 +281,35 @@ def render(url: str, *,
             raw = resp.text()
             if len(raw) > _MAX_XHR_BYTES or not raw.strip():
                 return
-            res.xhr_json.append({"url": resp.url.split("?")[0], "body": json.loads(raw)})
+            res.xhr_json.append({"url": resp.url.split("?")[0],
+                                 "kind": "response", "body": json.loads(raw)})
+        except Exception:
+            pass
+
+    def _on_request(req):
+        # the OTA's own API calls carry the booking config in their POST body —
+        # rooms[], per-room adults/children/childAges, dates, hotel id. That is
+        # the single cleanest occupancy source. Capture it.
+        if len(res.xhr_json) >= _MAX_XHR:
+            return
+        try:
+            if req.method not in ("POST", "PUT", "PATCH"):
+                return
+            if not keep(req.url):
+                return
+            raw = req.post_data
+            if not raw or len(raw) > _MAX_XHR_BYTES:
+                return
+            raw = raw.strip()
+            body = None
+            if raw[:1] in "{[":
+                body = json.loads(raw)
+            elif "=" in raw and "&" in raw:                # form-encoded
+                from urllib.parse import parse_qs
+                body = {k: v[0] for k, v in parse_qs(raw).items()}
+            if isinstance(body, (dict, list)) and body:
+                res.xhr_json.append({"url": req.url.split("?")[0],
+                                     "kind": "request", "body": body})
         except Exception:
             pass
 
@@ -280,6 +324,7 @@ def render(url: str, *,
         # inner_text) — some OTA SPAs never go network-idle and would otherwise
         # hang inner_text("body") / content() for minutes
         page.set_default_timeout(12000)
+        page.on("request", _on_request)
         page.on("response", _on_response)
         step(f"opening the URL in {channel} …")
         try:
@@ -316,8 +361,9 @@ def render(url: str, *,
                 res.json_ld.append(json.loads(node.inner_text()))
             except Exception:
                 pass
-        step(f"captured {len(res.xhr_json)} JSON API response(s), "
-             f"{len(res.json_ld)} JSON-LD block(s)")
+        _nreq = sum(1 for x in res.xhr_json if x.get("kind") == "request")
+        step(f"captured {len(res.xhr_json) - _nreq} API response(s) + "
+             f"{_nreq} request payload(s), {len(res.json_ld)} JSON-LD block(s)")
 
         text = ""
         if content_selector:

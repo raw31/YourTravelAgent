@@ -97,21 +97,21 @@ READING OTA URL PARAMETERS
 - Dates: `checkin` / `checkout` may be ISO (2026-09-21) or 8 digits.
   8-digit MakeMyTrip dates are MMDDYYYY (09032026 -> 2026-09-03). Booking.com
   uses ISO. If a page is also given and shows dates, the page wins.
-- Occupancy — decode to a per-room `occupancy` array:
-  * Booking.com: one `room1`,`room2`,... param each. "A,A" = 2 adults;
-    "A,A,7" = 2 adults + 1 child aged 7.
-  * MakeMyTrip `roomStayQualifier`: a flat "e"-separated stream, repeated
-    per room -> adults, children, <one age per child>, adults, children, ...
-    "2e1e3e2e1e2e" = Room 1: 2 adults + 1 child age 3 ; Room 2: 2 adults +
-    1 child age 2. `rsc` is the aggregate "rooms e adults e children e ages".
-  * Agoda `/book/` URLs: `roomName` param = the room name; `isBreakfastIncluded`
-    (false -> "Room only"); `isEasyCancel` (false -> "Non-refundable").
-    The `roomToken` param is a ";"-separated k:v blob — parse `sai:<number>`
-    as ota_benchmark.final_payable and `rcy:<code>` as currency; `h:<id>` is
-    the Agoda hotel id (NOT the name). A `nr0=<n>` param can give the room
-    count. Agoda `/book/` URLs contain NO dates, NO hotel name and NO clean
-    occupancy — those must come from the page; if there is no page content,
-    leave them null and the request will be flagged as a failure.
+- Occupancy — report what you can see; a downstream resolver decodes the
+  URL encodings, so your job is to read the PAGE and set stay.rooms /
+  stay.adults / stay.children and, when the page/dialog/[req] payload
+  actually splits guests by room, the per-room `occupancy` array.
+  Occupancy encodings you may still recognise directly: a per-room letter
+  list ("A,A,7" = 2 adults + 1 child aged 7), a flat number stream repeated
+  per room (adults, children, <one age each>), a `k:v` token blob (`o`/`occ`
+  = adults, `p`/`ch` = children), or plain `adults=`/`children=`/`rooms=`
+  params. If only a total is shown ("2 rooms, 4 adults, 2 children") set the
+  aggregates and leave `occupancy` [].
+- Agoda `/book/`: `roomName` = room name; `isBreakfastIncluded=false` ->
+  "Room only"; `isEasyCancel=false` -> "Non-refundable"; `roomToken` `sai:`
+  -> final_payable, `rcy:` -> currency; `h:<id>` is the Agoda hotel id (NOT
+  the name). These URLs carry NO dates and NO hotel name — those need the
+  page.
 - Price: Booking.com `rt_selected_total_price`; Agoda `roomToken` `sai:`.
   These are numbers only.
 - `_uCurrency` / `roomToken` `rcy:` give the currency.
