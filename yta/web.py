@@ -374,6 +374,37 @@ function render_resolution(rz) {
   } else if (rz.detail_error) {
     head += `<div class="muted" style="margin-top:8px">TripJack pricing call failed: ${esc(rz.detail_error)}</div>`;
   }
+  if (rz.room_map) {
+    const rm = rz.room_map;
+    head += `<div style="margin-top:14px"><h3 style="margin:0 0 6px">Room → rate-plan mapping
+      <span class="band ${rm.matched ? 'band-'+(rm.band==='strong'?'high':'medium') : 'band-none'}">${rm.matched ? esc(rm.band) : 'no match'}</span>
+      ${rm.llm_used ? '<span class="muted" style="font-weight:400">· LLM tie-break</span>' : ''}</h3>`;
+    if (rm.matched)
+      head += `<div class="muted" style="margin-bottom:6px">room_type_id <span class="mono">${esc(rm.room_type_id)}</span> · score <span class="mono">${rm.score}</span>
+        ${rm.meal_filter ? '· meal <span class="mono">'+esc(rm.meal_filter)+'</span>' : ''}
+        ${rm.refundable_filter!=null ? '· '+(rm.refundable_filter?'refundable':'non-refundable') : ''}</div>`;
+    if (rm.view_flag)
+      head += `<div class="muted" style="margin-bottom:6px">⚑ ${esc(rm.view_flag)}</div>`;
+    if (rm.notes && rm.notes.length)
+      head += `<ul class="warn-list">${rm.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+    if ((rm.rate_options||[]).length) {
+      head += `<table><tr><th>optionId</th><th>room</th><th>meal</th><th>total</th><th>tags</th></tr>
+        ${rm.rate_options.map(o=>`<tr>
+          <td class="mono">${esc((o.option_id||'').slice(0,8))}</td>
+          <td>${esc(o.room_name)}</td>
+          <td>${esc(o.meal_basis)}</td>
+          <td class="mono">${esc(o.currency)} ${o.total_price}</td>
+          <td class="muted">${(o.tags||[]).map(esc).join(', ')}</td></tr>`).join('')}
+        </table>`;
+    }
+    head += `<details><summary>all ${(rm.ranked_buckets||[]).length} room-type buckets (ranked)</summary>
+      <table><tr><th>room_type_id</th><th>best-matched name</th><th>score</th><th>band</th><th>#opt</th></tr>
+      ${(rm.ranked_buckets||[]).map(b=>`<tr>
+        <td class="mono">${esc(b.room_type_id)}</td><td>${esc(b.canonical)}</td>
+        <td class="mono">${b.score}</td><td class="muted">${esc(b.band)}</td>
+        <td class="mono">${b.n_options}</td></tr>`).join('')}
+      </table></details></div>`;
+  }
   head += `</div><details><summary>cascade trace</summary><pre class="raw">${esc((rz.layers||[]).join('\\n'))}</pre></details>`;
   return head + `</section>`;
 }
@@ -497,6 +528,19 @@ def _resolve(packet) -> dict:
                     packet.log(f"TripJack pricing → {len(det.options)} option(s)"
                                + (f"; {det.notes[0]}" if det.notes else "")
                                + f"  [{pms} ms]")
+
+                    # map the OTA requested offer onto a TJ ratekey
+                    if det.options:
+                        from yta.roommap import map_rooms
+                        rm = map_rooms(
+                            det.options, packet.requested_offer,
+                            benchmark_price=packet.ota_benchmark.final_payable,
+                            log=packet.log)
+                        d["room_map"] = rm.to_dict()
+                        packet.log(
+                            f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
+                            f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"
+                            + ("; LLM used" if rm.llm_used else ""))
             except TripJackError as e:
                 d["detail_error"] = str(e)
                 packet.log(f"TripJack pricing error: {e}")

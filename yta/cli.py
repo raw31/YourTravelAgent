@@ -129,6 +129,21 @@ def main(argv=None) -> int:
                     for nt in det.notes:
                         print(f"#   ! {nt}", file=sys.stderr)
                     print(json.dumps(det.to_dict(), indent=2, default=str))
+
+                    if det.options:
+                        from yta.roommap import map_rooms
+                        rm = map_rooms(
+                            det.options, packet.requested_offer,
+                            benchmark_price=packet.ota_benchmark.final_payable)
+                        print(f"\n# ── room → rate-plan mapping ──  "
+                              f"{'matched ' + rm.room_type_id if rm.matched else 'NO MATCH'}"
+                              f"  [{rm.band}]" + ("  (LLM)" if rm.llm_used else ""),
+                              file=sys.stderr)
+                        for nt in rm.notes:
+                            print(f"#   ! {nt}", file=sys.stderr)
+                        if rm.view_flag:
+                            print(f"#   ⚑ {rm.view_flag}", file=sys.stderr)
+                        print(json.dumps(rm.to_dict(), indent=2, default=str))
                 except TripJackError as e:
                     print(f"\n# TripJack pricing call failed: {e}", file=sys.stderr)
     return 0
