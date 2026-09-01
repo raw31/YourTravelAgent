@@ -199,6 +199,22 @@ def test_review_error_propagates():
     assert ei.value.code == "OPTION_SOLD_OUT"
 
 
+def test_find_option_matches_by_signature_not_id():
+    from yta.tripjack.hotel import find_option, _option_rtid
+    det = hotel_options("10000000012345", "2026-09-02", "2026-09-03",
+                        [{"adults": 2}], client=_StubClient())
+    rt = _option_rtid(det.options[0])           # the fixture's room signature
+    # fixture has two options for that room: Breakfast/refundable and
+    # Room Only/non-refundable
+    o = find_option(det, rt, "Breakfast", True)
+    assert o is not None and o.meal_basis == "Breakfast" and o.refundable
+    o2 = find_option(det, rt, "Room Only", False)
+    assert o2 is not None and not o2.refundable
+    # relaxation still returns something for the room when meal doesn't match
+    assert find_option(det, rt, "Nonexistent Meal", True) is not None
+    assert find_option(det, "99999", "Breakfast", True) is None
+
+
 # -- client config -----------------------------------------
 
 def test_client_unconfigured(monkeypatch):

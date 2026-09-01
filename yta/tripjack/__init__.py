@@ -15,8 +15,9 @@ from yta.tripjack.client import TripJackClient, TripJackError
 from yta.tripjack.hotel import (hotel_options, pricing_request,
                                 pricing_request_from_packet, SupplierDetail,
                                 SupplierOption, ReviewResult, review_option,
-                                review_request, review_from_detail)
+                                review_request, review_from_detail, find_option)
 
 __all__ = ["TripJackClient", "TripJackError", "hotel_options", "pricing_request",
            "pricing_request_from_packet", "SupplierDetail", "SupplierOption",
-           "ReviewResult", "review_option", "review_request", "review_from_detail"]
+           "ReviewResult", "review_option", "review_request", "review_from_detail",
+           "find_option"]

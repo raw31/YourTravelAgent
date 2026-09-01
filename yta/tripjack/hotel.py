@@ -308,3 +308,27 @@ def review_from_detail(detail: SupplierDetail, option_id: str, *,
     return review_option(
         detail.tj_id, option_id, detail.review_hash,
         correlation_id=detail.correlation_id, expected_price=quoted, client=client)
+
+
+def _option_rtid(opt: SupplierOption) -> str:
+    return "+".join(sorted(str(r.get("id")) for r in (opt.rooms or []) if r.get("id"))) or "?"
+
+
+def find_option(detail: SupplierDetail, room_type_id: str, meal_basis: str,
+                refundable: bool, near_price: float | None = None):
+    """Re-locate an option in a (possibly fresh) SupplierDetail by its stable
+    signature — option ids are regenerated on every pricing call, so a user's
+    earlier selection is matched back by room_type_id + meal + refundable
+    (+ closest price). Returns the SupplierOption or None."""
+    def _pick(cands):
+        if not cands:
+            return None
+        if near_price is not None:
+            return min(cands, key=lambda o: abs(o.total_price - near_price))
+        return min(cands, key=lambda o: o.total_price)
+
+    same_rt = [o for o in detail.options if _option_rtid(o) == room_type_id]
+    return (_pick([o for o in same_rt if o.meal_basis == meal_basis
+                   and bool(o.refundable) == bool(refundable)])
+            or _pick([o for o in same_rt if o.meal_basis == meal_basis])
+            or _pick(same_rt))
