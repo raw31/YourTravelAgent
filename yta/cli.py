@@ -134,7 +134,8 @@ def main(argv=None) -> int:
                         from yta.roommap import map_rooms
                         rm = map_rooms(
                             det.options, packet.requested_offer,
-                            benchmark_price=packet.ota_benchmark.final_payable)
+                            benchmark_price=packet.ota_benchmark.final_payable,
+                            policy=packet.matching_policy)
                         print(f"\n# ── room → rate-plan mapping ──  "
                               f"{'matched ' + rm.room_type_id if rm.matched else 'NO MATCH'}"
                               f"  [{rm.band}]" + ("  (LLM)" if rm.llm_used else ""),

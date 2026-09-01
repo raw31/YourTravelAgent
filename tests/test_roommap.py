@@ -81,9 +81,20 @@ def test_map_rooms_strong_match_and_ratekey():
 def test_map_rooms_bed_type_disambiguates():
     off = Offer(room_name="Deluxe Villa", bed_type="King", meal_plan="Room Only",
                 refundable=False)
-    r = map_rooms(OPTIONS, off, use_llm=False)
-    assert r.room_type_id == "R2"
+    r = map_rooms(OPTIONS, off, use_llm=False, policy={"meal": "exact",
+                                                       "cancellation": "exact"})
+    assert r.room_type_id == "R2"                # King bed -> R2, not plain R1
     assert [ro.option_id for ro in r.rate_options] == ["o6"]
+
+
+def test_map_rooms_cancellation_same_or_better():
+    # booked non-refundable -> a free-cancellation rate is an upgrade, kept + tagged
+    off = Offer(room_name="Deluxe Villa", bed_type="King", meal_plan="Room Only",
+                refundable=False)
+    r = map_rooms(OPTIONS, off, use_llm=False)          # default same_or_better
+    assert r.room_type_id == "R2"
+    o5 = next(ro for ro in r.rate_options if ro.option_id == "o5")
+    assert "cancel:better" in o5.tags
 
 
 def test_map_rooms_no_match_returns_ranked_buckets():
@@ -113,15 +124,29 @@ def test_map_rooms_view_flagged_and_ignored():
 
 def test_map_rooms_benchmark_tag():
     off = Offer(room_name="Premier Villa", meal_plan="Room Only", refundable=True)
-    r = map_rooms(OPTIONS, off, benchmark_price=46200, use_llm=False)
+    r = map_rooms(OPTIONS, off, benchmark_price=46200, use_llm=False,
+                  policy={"meal": "exact"})
     assert [ro.option_id for ro in r.rate_options] == ["o8"]
     assert "matches-benchmark" in r.rate_options[0].tags
+
+
+def test_map_rooms_meal_same_or_better():
+    # booked Room Only -> a Breakfast rate is an upgrade and is kept + tagged
+    off = Offer(room_name="Premier Villa", meal_plan="Room Only", refundable=True)
+    r = map_rooms(OPTIONS, off, use_llm=False)              # default same_or_better
+    ids = [ro.option_id for ro in r.rate_options]
+    assert ids == ["o8", "o7"]                              # cheapest first
+    better = next(ro for ro in r.rate_options if ro.option_id == "o7")
+    assert "meal:better" in better.tags
+    # exact policy keeps only the Room Only rate
+    r2 = map_rooms(OPTIONS, off, use_llm=False, policy={"meal": "exact"})
+    assert [ro.option_id for ro in r2.rate_options] == ["o8"]
 
 
 def test_map_rooms_accepts_supplier_options():
     from yta.tripjack.hotel import _norm_option
     sopts = [_norm_option(o) for o in OPTIONS]
     off = Offer(room_name="Deluxe Villa", meal_plan="Breakfast", refundable=True)
-    r = map_rooms(sopts, off, use_llm=False)
+    r = map_rooms(sopts, off, use_llm=False, policy={"meal": "exact"})
     assert r.matched and r.room_type_id == "R1"
     assert [ro.option_id for ro in r.rate_options] == ["o1"]

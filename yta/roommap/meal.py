@@ -14,10 +14,26 @@ import re
 
 TJ_MEALS = ("Room Only", "Breakfast", "Half Board", "Full Board", "All Inclusive")
 
+# meal ladder — weak to strong. `same_or_better` (the default matching policy)
+# keeps a TJ option when its rank >= the requested rank.
+MEAL_RANK = {
+    "Room Only": 0,
+    "Breakfast": 1,
+    "Half Board": 2,       # breakfast + one more meal
+    "Full Board": 3,       # breakfast + lunch + dinner
+    "All Inclusive": 4,    # full board + drinks / more
+}
+
+
+def meal_rank(tj_meal: str | None) -> int:
+    """Rank of a TJ mealBasis value; unknown -> -1 (never satisfies a policy)."""
+    return MEAL_RANK.get(tj_meal or "", -1)
+
+
 # exact meal codes (whole-string match only)
 _CODES = {
-    "ro": "Room Only", "ep": "Room Only", "ep": "Room Only", "nm": "Room Only",
-    "bb": "Breakfast", "cp": "Breakfast", "bo": "Breakfast",
+    "ro": "Room Only", "ep": "Room Only", "nm": "Room Only", "sc": "Room Only",
+    "bb": "Breakfast", "cp": "Breakfast", "bo": "Breakfast", "b&b": "Breakfast",
     "hb": "Half Board", "map": "Half Board",
     "fb": "Full Board", "ap": "Full Board",
     "ai": "All Inclusive", "all": "All Inclusive",
@@ -54,8 +70,11 @@ def meal_to_tj(text: str | None) -> str | None:
         return "Half Board"
     if any(k in n for k in (
             "room only", "roomonly", "no meal", "no meals", "without breakfast",
-            "without meal", "self catering", "self-catering", "room with no")):
+            "without meal", "meal not included", "meals not included",
+            "self catering", "self-catering", "european plan", "room with no")):
         return "Room Only"
-    if "breakfast" in n or n in ("continental", "bed and breakfast"):
+    if any(k in n for k in (
+            "breakfast", "bed and breakfast", "continental plan", "b b")) \
+            or n == "continental":
         return "Breakfast"
     return None

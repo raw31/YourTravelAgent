@@ -27,7 +27,10 @@ from yta.roommap.normalize import (
     CONFIG, RoomMatchConfig, RoomNormalizationService,
     split_name_and_view, views_match,
 )
-from yta.roommap.meal import meal_to_tj
+from yta.roommap.meal import meal_to_tj, meal_rank
+
+# the default matching policy (mirrors yta.schema.DEFAULT_MATCHING_POLICY)
+_DEFAULT_POLICY = {"meal": "same_or_better", "cancellation": "same_or_better"}
 
 _PERKS = [
     (re.compile(r"hi[\s-]?tea", re.I), "hi-tea"),
@@ -174,13 +177,17 @@ def _llm_confirm(offer, bucket) -> bool:
 # -- entry point ---------------------------------------------------------
 
 def map_rooms(options, offer, *, benchmark_price: float | None = None,
+              policy: dict | None = None,
               config: RoomMatchConfig | None = None, use_llm: bool = True,
               log=None) -> RoomMapResult:
     """`options`   : TJ pricing options (raw dicts or SupplierOption list)
     `offer`      : yta.schema.Offer  (requested_offer from the packet)
     `benchmark_price` : ota_benchmark.final_payable, for the matches-benchmark tag
+    `policy`     : matching_policy dict — `meal` / `cancellation` each
+                   "exact" or "same_or_better" (default: same_or_better)
     """
     cfg = config or CONFIG
+    pol = {**_DEFAULT_POLICY, **(policy or {})}
     svc = RoomNormalizationService(cfg)
     notes: list[str] = []
 
@@ -290,30 +297,44 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
             notes.append(view_flag)
             _log(f"  view: {view_flag}")
 
-    # 5. meal + refundable filter
+    # 5. meal + refundable filter — honour the matching policy
     sel = list(buckets_rows[chosen.room_type_id])
     tj_meal = meal_to_tj(offer.meal_plan)
+    meal_pol = pol["meal"]
     if tj_meal:
-        m = [r for r in sel if r["meal_basis"] == tj_meal]
-        if m:
-            sel = m
+        want = meal_rank(tj_meal)
+        if meal_pol == "same_or_better":
+            keep = [r for r in sel if meal_rank(r["meal_basis"]) >= want]
         else:
-            notes.append(f"no {tj_meal!r} option for this room — showing all meal plans")
+            keep = [r for r in sel if r["meal_basis"] == tj_meal]
+        if keep:
+            sel = keep
+        else:
+            notes.append(f"no {tj_meal!r}"
+                         f"{'-or-better' if meal_pol == 'same_or_better' else ''} "
+                         f"option for this room — showing all meal plans")
             tj_meal = None
-    _log(f"  meal filter: {offer.meal_plan!r} -> {tj_meal!r}  ({len(sel)} left)")
+    _log(f"  meal filter [{meal_pol}]: {offer.meal_plan!r} -> {tj_meal!r}  ({len(sel)} left)")
 
     ref_filter = offer.refundable
+    canc_pol = pol["cancellation"]
     if offer.refundable is not None:
-        rr = [r for r in sel if r["refundable"] == offer.refundable]
-        if rr:
-            sel = rr
+        if offer.refundable is False and canc_pol == "same_or_better":
+            # a free-cancellation rate is an upgrade over a non-refundable
+            # request — keep everything, tag the upgrades below
+            keep = sel
+        else:
+            keep = [r for r in sel if r["refundable"] == offer.refundable]
+        if keep:
+            sel = keep
         else:
             notes.append(f"no {'refundable' if offer.refundable else 'non-refundable'} "
                          f"option for this room/meal — showing all")
             ref_filter = None
-    _log(f"  refundable filter: {offer.refundable} -> {len(sel)} option(s)")
+    _log(f"  cancellation filter [{canc_pol}]: {offer.refundable} -> {len(sel)} option(s)")
 
     # 6. tag + return all
+    want_meal = meal_rank(meal_to_tj(offer.meal_plan)) if offer.meal_plan else -1
     cheapest = min((r["total_price"] for r in sel), default=None)
     rate_options = []
     for r in sorted(sel, key=lambda r: r["total_price"]):
@@ -323,6 +344,10 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
         if benchmark_price and benchmark_price > 0 \
                 and abs(r["total_price"] - benchmark_price) / benchmark_price <= 0.02:
             tags.append("matches-benchmark")
+        if want_meal >= 0 and meal_rank(r["meal_basis"]) > want_meal:
+            tags.append("meal:better")
+        if offer.refundable is False and r["refundable"]:
+            tags.append("cancel:better")
         tags += [f"perk:{p}" for p in _perks(r["room_name"])]
         rate_options.append(RateOption(
             option_id=r["option_id"], room_type_id=r["room_type_id"],

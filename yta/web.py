@@ -535,7 +535,7 @@ def _resolve(packet) -> dict:
                         rm = map_rooms(
                             det.options, packet.requested_offer,
                             benchmark_price=packet.ota_benchmark.final_payable,
-                            log=packet.log)
+                            policy=packet.matching_policy, log=packet.log)
                         d["room_map"] = rm.to_dict()
                         packet.log(
                             f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
