@@ -276,6 +276,10 @@ def render(url: str, *,
         ctx = browser.new_context(user_agent=_UA, locale="en-US",
                                   viewport={"width": 1366, "height": 900})
         page = ctx.new_page()
+        # hard cap on every implicit wait (actionability checks, selectors,
+        # inner_text) — some OTA SPAs never go network-idle and would otherwise
+        # hang inner_text("body") / content() for minutes
+        page.set_default_timeout(12000)
         page.on("response", _on_response)
         step(f"opening the URL in {channel} …")
         try:

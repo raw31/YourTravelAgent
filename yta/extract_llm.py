@@ -64,6 +64,7 @@ Return ONLY this JSON shape:
     "view": string|null,
     "meal_plan": string|null,       // e.g. "Breakfast included", "Room only", "Half board"
     "cancellation": string|null,    // the policy TEXT as shown, e.g. "Free cancellation until 5 Sep 2026", "Non-refundable"
+    "refundable": true|false|null,   // derive from the cancellation text: any "free cancellation" / "fully refundable" => true; "non-refundable" / "no refund" / "cannot be cancelled" => false; unclear => null
     "payment_terms": string|null    // e.g. "Pay now", "Pay at the property", "Book now, pay later"
   },
   "ota_benchmark": {
@@ -153,7 +154,7 @@ _FIELDS = [
     "requested_offer.room_name", "requested_offer.description",
     "requested_offer.bed_type", "requested_offer.view",
     "requested_offer.meal_plan", "requested_offer.cancellation",
-    "requested_offer.payment_terms",
+    "requested_offer.refundable", "requested_offer.payment_terms",
     "ota_benchmark.subtotal", "ota_benchmark.taxes", "ota_benchmark.fees",
     "ota_benchmark.discount", "ota_benchmark.final_payable", "ota_benchmark.currency",
 ]
