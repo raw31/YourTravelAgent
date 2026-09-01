@@ -51,7 +51,7 @@ def test_pricing_request_body():
                            {"adults": 2, "children": 1, "child_ages": [2]}],
                           currency="INR")
     assert req["method"] == "POST"
-    assert req["url"] == "https://apitest-hms.tripjack.com/hms/v3/hotel/pricing"
+    assert req["url"] == "https://hms-search.tripjack.com/hms/v3/hotel/pricing"
     assert req["headers"]["apikey"] == "<TRIPJACK_API_KEY>"
     b = req["body"]
     assert b["hid"] == "10000000012345"

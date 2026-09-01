@@ -34,6 +34,8 @@ def main(argv=None) -> int:
                     help="print the per-field provenance trail")
     ap.add_argument("--no-resolve", action="store_true",
                     help="skip the TripJack hotel-id lookup")
+    ap.add_argument("--price", action="store_true",
+                    help="on a confident match, actually POST /hms/v3/hotel/pricing")
     ap.add_argument("--timeout", type=int, default=40000)
     ap.add_argument("--compact", action="store_true")
     args = ap.parse_args(argv)
@@ -103,6 +105,32 @@ def main(argv=None) -> int:
             print(json.dumps(req["body"], indent=2))
         except ValueError as e:
             print(f"\n# TripJack Detail request not buildable: {e}", file=sys.stderr)
+            req = None
+
+        if args.price and req and tj.band in ("high", "medium"):
+            from yta.tripjack.client import TripJackClient, TripJackError
+            from yta.tripjack.hotel import hotel_options
+            client = TripJackClient.from_env()
+            if not client.configured():
+                print("\n# TripJack pricing skipped — TRIPJACK_API_KEY not set",
+                      file=sys.stderr)
+            else:
+                s = packet.stay
+                try:
+                    det = hotel_options(
+                        m.tj_id, s.check_in, s.check_out,
+                        s.occupancy or [{"adults": s.adults or 2,
+                                         "children": s.children or 0,
+                                         "child_ages": s.child_ages or []}],
+                        currency=packet.ota_benchmark.currency or "INR",
+                        client=client)
+                    print(f"\n# ── TripJack live options ──  {len(det.options)} option(s)",
+                          file=sys.stderr)
+                    for nt in det.notes:
+                        print(f"#   ! {nt}", file=sys.stderr)
+                    print(json.dumps(det.to_dict(), indent=2, default=str))
+                except TripJackError as e:
+                    print(f"\n# TripJack pricing call failed: {e}", file=sys.stderr)
     return 0
 
 

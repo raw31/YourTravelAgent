@@ -17,12 +17,18 @@ try:
 except ImportError:
     pass
 
-# test hosts (docs §"Quick host/endpoint reference"). Prod differs — set via env.
+# verified: production hotel search / pricing is served from hms-search
+# (2026-09). The reference doc's `apitest-*` hosts are the sandbox.
 _HOSTS = {
+    "prod": {
+        "hms": "hms-search.tripjack.com",            # listing / pricing / review / static-detail
+        "oms": "hotel-booker.tripjack.com",          # book / confirm / cancel (unverified)
+        "gw": "hms-search.tripjack.com",
+    },
     "test": {
-        "hms": "apitest-hms.tripjack.com",           # listing / pricing / review / static-detail
-        "oms": "apitest-hotel-booker.tripjack.com",  # book / confirm / cancel / booking-details
-        "gw": "apitest.tripjack.com",                # nationality-info / fetch-static-hotels
+        "hms": "apitest-hms.tripjack.com",
+        "oms": "apitest-hotel-booker.tripjack.com",
+        "gw": "apitest.tripjack.com",
     },
 }
 
@@ -50,20 +56,20 @@ class TripJackError(RuntimeError):
 
 
 class TripJackClient:
-    def __init__(self, api_key: str | None = None, *, env: str = "test",
+    def __init__(self, api_key: str | None = None, *, env: str = "prod",
                  nationality: str = "106", timeout: float = 25.0,
                  hosts: dict | None = None):
         self.api_key = api_key or os.environ.get("TRIPJACK_API_KEY", "")
-        self.env = env or os.environ.get("TRIPJACK_ENV", "test")
-        self.nationality = nationality or os.environ.get("TRIPJACK_NATIONALITY", "106")
+        self.env = env or "prod"
+        self.nationality = nationality or "106"
         self.timeout = timeout
-        self.hosts = hosts or _HOSTS.get(self.env) or _HOSTS["test"]
+        self.hosts = hosts or _HOSTS.get(self.env) or _HOSTS["prod"]
 
     @classmethod
     def from_env(cls) -> "TripJackClient":
         return cls(
             api_key=os.environ.get("TRIPJACK_API_KEY", ""),
-            env=os.environ.get("TRIPJACK_ENV", "test"),
+            env=os.environ.get("TRIPJACK_ENV", "prod"),
             nationality=os.environ.get("TRIPJACK_NATIONALITY", "106"),
         )
 
@@ -72,7 +78,12 @@ class TripJackClient:
 
     # -- transport --------------------------------------------------
 
-    def _post(self, group: str, path: str, body: dict, *, retries: int = 3) -> dict:
+    def _post(self, group: str, path: str, body: dict, *, retries: int = 3,
+              body_key: str | None = None) -> dict:
+        """POST and return the JSON body. Raises TripJackError on a real
+        failure. If `body_key` is given, a `success:false` response that
+        still carries that key (e.g. pricing with `options:[]` = sold out)
+        is returned as-is rather than raised."""
         import requests
 
         if not self.api_key:
@@ -93,6 +104,9 @@ class TripJackClient:
 
             if data.get("status", {}).get("success"):
                 return data
+            if body_key and body_key in data and not data.get("errors") \
+                    and not data.get("error"):
+                return data                          # e.g. no availability
 
             # TripJack uses either {error:{code,message}} or {errors:[{errCode,message}]}
             err = data.get("error") or {}
@@ -143,10 +157,11 @@ class TripJackClient:
         }
 
     PRICING_PATH = "/hms/v3/hotel/pricing"
-    PRICING_URL_TEST = "https://apitest-hms.tripjack.com/hms/v3/hotel/pricing"
+    PRICING_URL_PROD = "https://hms-search.tripjack.com/hms/v3/hotel/pricing"
 
     def pricing(self, **kw) -> dict:
-        return self._post("hms", self.PRICING_PATH, self.pricing_body(**kw))
+        return self._post("hms", self.PRICING_PATH, self.pricing_body(**kw),
+                          body_key="options")
 
     def review(self, *, correlation_id, option_id, review_hash, hid) -> dict:
         return self._post("hms", "/hms/v3/hotel/review", {

@@ -1,7 +1,7 @@
 """hotel_options() — the TripJack Hotel **Detail / Pricing** call for one
 resolved hotel id, normalised.
 
-    POST https://apitest-hms.tripjack.com/hms/v3/hotel/pricing
+    POST https://hms-search.tripjack.com/hms/v3/hotel/pricing
 
 Just this endpoint. Given tj_id + check_in/check_out + per-room occupancy,
 returns the hotel's live bookable options (rooms, rates, meal plans,
@@ -143,7 +143,7 @@ def _f(v):
 
 # -- request building (no network) ----------------------------
 
-PRICING_URL = "https://apitest-hms.tripjack.com/hms/v3/hotel/pricing"
+PRICING_URL = "https://hms-search.tripjack.com/hms/v3/hotel/pricing"
 
 
 def pricing_request(tj_id, check_in: str, check_out: str, occupancy, *,
@@ -198,9 +198,15 @@ def hotel_options(tj_id, check_in: str, check_out: str, occupancy, *,
                           rooms=rooms, currency=currency, nationality=nat,
                           correlation_id=corr)
     result.raw = resp
-    result.hotel_name = resp.get("hotelName")
+    result.hotel_name = resp.get("hotelName") or resp.get("name")
     result.review_hash = resp.get("reviewHash")
     result.options = [_norm_option(o) for o in resp.get("options", []) or []]
     if not result.options:
-        result.notes.append("no bookable options returned for this stay")
+        if not resp.get("status", {}).get("success"):
+            result.notes.append(
+                "no bookable options — TripJack has no inventory for this hotel/stay "
+                "(the static dump lists more hotels than the API sells)")
+        else:
+            result.notes.append(
+                "no bookable options match this occupancy / date range")
     return result

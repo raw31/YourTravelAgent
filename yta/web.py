@@ -348,10 +348,31 @@ function render_resolution(rz) {
   }
   if (rz.detail_request) {
     const dr = rz.detail_request;
-    head += `<details open><summary>TripJack Detail request — POST ${esc(dr.url)}</summary>
+    head += `<details><summary>TripJack Detail request — POST ${esc(dr.url)}</summary>
       <pre class="raw">${esc(JSON.stringify(dr.body, null, 2))}</pre></details>`;
   } else if (rz.detail_request_error) {
     head += `<div class="muted" style="margin-top:8px">Detail request not buildable: ${esc(rz.detail_request_error)}</div>`;
+  }
+  if (rz.detail) {
+    const dt = rz.detail, opts = dt.options || [];
+    head += `<div style="margin-top:14px"><h3 style="margin:0 0 6px">TripJack live options
+      <span class="muted" style="font-weight:400">· ${esc(dt.hotel_name||'')} · ${opts.length} option(s)</span></h3>`;
+    if (dt.notes && dt.notes.length)
+      head += `<ul class="warn-list">${dt.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+    if (opts.length) {
+      head += `<table><tr><th>room</th><th>meal</th><th>refundable</th><th>free-cancel until</th><th>total</th><th>type</th></tr>
+        ${opts.map(o=>`<tr>
+          <td>${esc((o.rooms||[]).map(r=>r.name).join(' + ')||'—')}</td>
+          <td>${esc(o.meal_basis||'—')}</td>
+          <td>${o.refundable ? 'yes' : 'no'}</td>
+          <td class="muted">${val(o.free_cancel_until)}</td>
+          <td class="mono">${esc(o.currency||'')} ${o.total_price}</td>
+          <td class="mono muted">${esc(o.option_type||'')}</td></tr>`).join('')}
+        </table>`;
+    }
+    head += `<details><summary>raw pricing response</summary><pre class="raw">${esc(JSON.stringify(dt, null, 2))}</pre></details></div>`;
+  } else if (rz.detail_error) {
+    head += `<div class="muted" style="margin-top:8px">TripJack pricing call failed: ${esc(rz.detail_error)}</div>`;
   }
   head += `</div><details><summary>cascade trace</summary><pre class="raw">${esc((rz.layers||[]).join('\\n'))}</pre></details>`;
   return head + `</section>`;
@@ -452,6 +473,36 @@ def _resolve(packet) -> dict:
             except ValueError as e:
                 d["detail_request_error"] = str(e)
                 packet.log(f"TripJack Detail request not buildable: {e}")
+
+        # actually hit POST /hms/v3/hotel/pricing for a confident match
+        if m and r.band in ("high", "medium") and "detail_request" in d:
+            try:
+                from yta.tripjack.client import TripJackClient, TripJackError
+                from yta.tripjack.hotel import hotel_options
+                client = TripJackClient.from_env()
+                if not client.configured():
+                    packet.log("TripJack pricing skipped — TRIPJACK_API_KEY not set")
+                else:
+                    s = packet.stay
+                    t2 = time.perf_counter()
+                    det = hotel_options(
+                        m.tj_id, s.check_in, s.check_out,
+                        s.occupancy or [{"adults": s.adults or 2,
+                                         "children": s.children or 0,
+                                         "child_ages": s.child_ages or []}],
+                        currency=packet.ota_benchmark.currency or "INR",
+                        client=client)
+                    pms = round((time.perf_counter() - t2) * 1000, 1)
+                    d["detail"] = det.to_dict()
+                    packet.log(f"TripJack pricing → {len(det.options)} option(s)"
+                               + (f"; {det.notes[0]}" if det.notes else "")
+                               + f"  [{pms} ms]")
+            except TripJackError as e:
+                d["detail_error"] = str(e)
+                packet.log(f"TripJack pricing error: {e}")
+            except Exception as e:  # noqa: BLE001
+                d["detail_error"] = f"{type(e).__name__}: {e}"
+                packet.log(f"TripJack pricing error: {type(e).__name__}: {e}")
         return d
     except Exception as e:  # noqa: BLE001
         packet.log(f"TripJack lookup error: {type(e).__name__}: {e}")
