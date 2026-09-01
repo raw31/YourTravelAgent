@@ -336,7 +336,7 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
             if meal_pol == "same_or_better":
                 if rr < req_rank:
                     return False
-            elif rr != req_rank:
+            elif meal_to_tj(r["meal_basis"]) != req_meal:
                 return False
         if req_ref is not None:
             if req_ref and not r["refundable"]:
@@ -353,7 +353,7 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
         tags = ["refundable" if r["refundable"] else "non-refundable"]
         rr = meal_rank(r["meal_basis"])
         if req_meal:
-            if r["meal_basis"] == req_meal:
+            if meal_to_tj(r["meal_basis"]) == req_meal:
                 tags.append("meal:exact")
             elif rr > req_rank:
                 tags.append("meal:better")

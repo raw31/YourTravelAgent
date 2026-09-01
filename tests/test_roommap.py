@@ -8,6 +8,14 @@ from yta.roommap import (
 
 # -- meal_to_tj -----------------------------------------------------------
 
+def test_meal_rank_normalises_richer_strings():
+    from yta.roommap.meal import meal_rank
+    assert meal_rank("Breakfast") == 1
+    assert meal_rank("Breakfast for 2") == 1          # TJ sometimes passes these
+    assert meal_rank("Half board (buffet dinner)") == 2
+    assert meal_rank("mystery") == -1
+
+
 def test_meal_to_tj_basic():
     assert meal_to_tj("Breakfast included") == "Breakfast"
     assert meal_to_tj("Bed & Breakfast") == "Breakfast"

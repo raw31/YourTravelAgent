@@ -25,9 +25,15 @@ MEAL_RANK = {
 }
 
 
-def meal_rank(tj_meal: str | None) -> int:
-    """Rank of a TJ mealBasis value; unknown -> -1 (never satisfies a policy)."""
-    return MEAL_RANK.get(tj_meal or "", -1)
+def meal_rank(meal: str | None) -> int:
+    """Rank of a meal on the ladder; -1 if unrecognised. Accepts either a
+    canonical TJ enum value or a richer string TJ sometimes passes through
+    ("Breakfast for 2", "Breakfast buffet", "Half board (buffet dinner)")."""
+    if not meal:
+        return -1
+    if meal in MEAL_RANK:
+        return MEAL_RANK[meal]
+    return MEAL_RANK.get(meal_to_tj(meal) or "", -1)
 
 
 # exact meal codes (whole-string match only)
