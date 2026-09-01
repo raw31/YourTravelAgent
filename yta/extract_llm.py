@@ -82,6 +82,16 @@ You are also given the BOOKING URL and its query parameters. OTA URLs encode
 a lot of the booking directly — use them, and cross-check against the page
 when the page is readable.
 
+The page content may include a "CAPTURED API DATA" block — booking-relevant
+fields pulled from the JSON the OTA's own page fetched. OTAs keep the
+per-room guest split, child ages, full price break-up and cancellation rules
+behind a "Details" / "Guest information" / "Show more" click; that data
+still shows up here. Read it. It is authoritative — prefer it over anything
+you'd have to infer. Per-room guest strings look like
+`roomGuests[0].adultString = "2 adults"`, `childrenString = "1 Child"`,
+`childrenAgesString = "3 yrs, 2 yrs"` (parse "3 yrs, 2 yrs" -> child_ages
+[3, 2]) — map each room to one `occupancy` entry, in order.
+
 READING OTA URL PARAMETERS
 - Dates: `checkin` / `checkout` may be ISO (2026-09-21) or 8 digits.
   8-digit MakeMyTrip dates are MMDDYYYY (09032026 -> 2026-09-03). Booking.com
@@ -124,8 +134,13 @@ RULES
 - Dates as YYYY-MM-DD. If the page shows only a weekday/day-month, combine
   with the year in context; if you cannot be sure of the year, use null.
 - occupancy: for a multi-room booking give the per-room split exactly as
-  shown ("Room 1: 2 adults", "Room 2: 2 adults, 1 child age 3"). child_ages
-  lists one age per child when the page states them, else [].
+  shown ("Room 1: 2 adults", "Room 2: 2 adults, 1 child age 3"), including
+  from a collapsed "Guest information" panel or the CAPTURED API DATA block.
+  child_ages lists one age per child when stated ("3 yrs, 2 yrs" -> [3, 2]),
+  else []. Only when NO per-room split exists anywhere (page, dialog, API,
+  URL) — just an aggregate like "2 rooms, 4 adults, 2 children" — leave
+  `occupancy` as [] and fill stay.rooms / stay.adults / stay.children; do
+  NOT split it yourself.
 - If the page shows a different value than the URL_HINTS below, still
   report what the PAGE shows and add an entry to "contradicts_url".
 - Output ONLY the JSON object. No markdown, no commentary."""

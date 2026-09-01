@@ -46,7 +46,8 @@ class RenderResult:
     browser_channel: str = ""
     coords: tuple | None = None                       # (lat, lng, source) from geoscan
 
-    def llm_context(self, max_text: int = 7000, max_json: int = 2500) -> str:
+    def llm_context(self, max_text: int = 7000, max_json: int = 2500,
+                    max_digest: int = 9000) -> str:
         parts = [f"PAGE URL: {self.final_url or self.url}", "",
                  "RENDERED PAGE TEXT (booking-relevant excerpt):",
                  focus(self.text, max_text)]
@@ -54,9 +55,12 @@ class RenderResult:
             parts += ["", "EMBEDDED JSON-LD:",
                       json.dumps(self.json_ld, ensure_ascii=False)[:max_json]]
         if self.xhr_json:
-            parts += ["", "CAPTURED API RESPONSES (JSON the page fetched — "
-                      "often the cleanest source for room/price/policy):",
-                      json.dumps(self.xhr_json, ensure_ascii=False, default=str)[:max_json]]
+            digest = _json_digest(self.xhr_json, max_digest)
+            parts += ["", "CAPTURED API DATA (booking-relevant fields pulled from "
+                      "the JSON the page fetched — often carries the per-room "
+                      "guest split, child ages, price breakup and cancellation "
+                      "rules that the visible page keeps behind a click):",
+                      digest]
         return "\n".join(parts)
 
     def has_content(self) -> bool:
@@ -77,6 +81,93 @@ class RenderResult:
                     in x["url"] for x in self.xhr_json)
                 or "/hotel-details" in f or "no_availability" in f
                 or "not a robot" in self.text.lower()[:2000])
+
+
+# keys / values worth surfacing from a captured SPA API payload
+_JSON_KEEP = re.compile(
+    r"(?i)room|guest|adult|child|infant|pax|occup|bed|price|amount|total|"
+    r"payable|tax|fee|discount|fare|cancel|refund|penalt|deadline|"
+    r"check.?in|check.?out|night|\bdate\b|meal|board|breakfast|inclusion|"
+    r"rate.?plan|non.?refundable|hotel.?name|address|latitude|longitude")
+# UI plumbing / promo noise that also matches _JSON_KEEP — drop it
+_JSON_DROP = re.compile(
+    r"(?i)coupon|voucher|supercoin|super.?coin|salutation|raventrack|"
+    r"eventname|actionlist|\bcta\b|_api_call|navigate|redirect|tooltip|"
+    r"iconid|placeholder|validation|add new guest|saved guest|"
+    r"^[A-Z][A-Z0-9_]{4,}$")
+# leaves whose path names a high-value field — surface these first
+_JSON_PRIORITY = re.compile(
+    r"(?i)roomguest|occup|paxinfo|childrenages|childage|adultstring|"
+    r"childrenstring|cancellation|penalt|breakup|break-up|pricingdetail|"
+    r"check.?in|check.?out|roomname|room_type|hotelname|hotel_name|"
+    r"mealbasis|meal_plan|totalprice|total_amount|finalprice|amount")
+
+
+def _json_digest(xhr_list: list, max_chars: int) -> str:
+    """Walk captured API JSON and keep only booking-relevant scalar leaves, so
+    a big SPA payload still surfaces per-room occupancy / child ages / price
+    breakup / cancellation rules to a small-context model (a blind prefix
+    truncation would cut them off — the good bits sit deep in the tree).
+    High-value fields (roomGuests, cancellation, price breakup …) come first."""
+    keep: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                kp = f"{path}.{k}" if path else str(k)
+                if isinstance(v, (dict, list)):
+                    walk(v, kp)
+                    continue
+                if v in (None, "", "null"):
+                    continue
+                sv = str(v)
+                if len(sv) >= 160 or _JSON_DROP.search(kp) or _JSON_DROP.search(sv):
+                    continue
+                if not (_JSON_KEEP.search(str(k)) or _JSON_KEEP.search(sv)):
+                    continue
+                line = f"{'.'.join(kp.split('.')[-3:])} = {v}"
+                if line in seen:
+                    continue
+                seen.add(line)
+                keep.append((0 if _JSON_PRIORITY.search(kp) else 1, line))
+        elif isinstance(node, list):
+            for i, v in enumerate(node[:60]):
+                walk(v, f"{path}[{i}]")
+
+    for blob in xhr_list:
+        walk(blob.get("body"), "")
+
+    keep.sort(key=lambda t: t[0])                 # priority lines first, stable
+    return "\n".join(line for _, line in keep)[:max_chars]
+
+
+# expand collapsed / clickable content before scraping the text — accordions,
+# "show more", price break-ups, "guest information", room-detail sheets, fare
+# rules. Generic: no per-OTA selectors.
+_EXPAND_JS = r"""
+() => {
+  const RX = /\b(show|view|see|read)\s+(more|all|details|breakup|break-up|breakdown|rules)\b|\bmore\s+details\b|\b(guest|room|rate|price|fare|booking|tax)\s+(info|information|details|rules|breakup|break-up)\b|\bcancellation\s+(policy|details|charges|info)\b|\bprice\s+breakup\b|\+\s*\d+\s+more\b|^details$|^see details$|^view details$/i;
+  const DENY = /log ?in|sign ?up|sign ?in|checkout|pay ?now|continue to pay|book now|proceed|delete|remove|cancel booking|apply|coupon|redeem/i;
+  let n = 0;
+  document.querySelectorAll('details:not([open])').forEach(d => { try { d.open = true; n++; } catch(e){} });
+  const els = document.querySelectorAll(
+    'button,a,summary,[role="button"],[aria-expanded="false"],' +
+    '[class*="accordion" i],[class*="expand" i],[class*="collaps" i],' +
+    '[class*="disclosure" i],[data-testid*="detail" i],[data-testid*="expand" i]');
+  for (const el of els) {
+    if (n >= 25) break;
+    const txt = (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 80);
+    const expandable = el.getAttribute('aria-expanded') === 'false'
+      || el.tagName === 'SUMMARY' || RX.test(txt);
+    if (!expandable || DENY.test(txt)) continue;
+    const href = el.getAttribute('href');
+    if (href && /^https?:/i.test(href)) continue;      // don't navigate away
+    try { el.click(); n++; } catch(e){}
+  }
+  return n;
+}
+"""
 
 
 def _require_playwright():
@@ -204,6 +295,16 @@ def render(url: str, *,
             step("bot-challenge page detected — waiting for it to clear")
             res.notes.append("bot-challenge page — waiting for auto-retry")
             page.wait_for_timeout(7000)
+
+        # open accordions / "show more" / guest-info & price-breakup sheets so
+        # their text gets scraped too (generic — no per-OTA selectors)
+        try:
+            opened = page.evaluate(_EXPAND_JS)
+            if opened:
+                step(f"expanded {opened} collapsible/clickable section(s)")
+                page.wait_for_timeout(1500)
+        except Exception:
+            pass
 
         res.final_url = page.url
         for node in page.query_selector_all('script[type="application/ld+json"]'):
