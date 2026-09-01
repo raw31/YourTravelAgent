@@ -193,7 +193,7 @@ $('#files').addEventListener('change', () => {
 
 function log_section(entries, running) {
   const spin = running ? ' <span class="spin">▍</span>' : '';
-  return `<section><details open><summary>Logs — ${entries.length} step(s)${spin}</summary>
+  return `<section><details${running ? ' open' : ''}><summary>Logs — ${entries.length} step(s)${spin}</summary>
     <table class="log">${entries.map(l => `<tr>
       <td class="mono muted">${String(l.ms).padStart(6)} ms</td>
       <td>${esc(l.msg)}</td></tr>`).join('')}</table></details></section>`;
@@ -275,9 +275,16 @@ function render(d) {
     <div>Source IDs</div><div class="mono">hotel=${val(p.source.source_hotel_id)} room=${val(p.source.source_room_id)}</div>
   </div></div></section>`;
 
-  html += render_resolution(d.resolution);
+  html += resolution_hotel(d.resolution);
+  html += resolution_roommap(d.resolution);
 
-  html += `<section><h2>Evidence — ${p.evidence.length} field(s)</h2>
+  if (p.warnings.length) html += `<section><h2>Warnings — ${p.warnings.length}</h2>
+    <div class="body"><ul class="warn-list">${p.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div></section>`;
+
+  // ── everything below is collapsed by default ──
+  html += resolution_live_options(d.resolution);
+
+  html += `<section><details><summary>Evidence — ${p.evidence.length} field(s)</summary>
     <table><tr><th>Field</th><th>Value</th><th>Source</th><th>Conf.</th><th>Pointer</th></tr>
     ${p.evidence.map(e => `<tr>
       <td class="mono">${esc(e.field)}</td>
@@ -285,10 +292,7 @@ function render(d) {
       <td><span class="src src-${esc(e.source)}">${esc(e.source)}</span></td>
       <td class="conf">${e.confidence}</td>
       <td class="mono muted">${e.pointer ? esc(e.pointer) : ''}</td></tr>`).join('')}
-    </table></section>`;
-
-  if (p.warnings.length) html += `<section><h2>Warnings — ${p.warnings.length}</h2>
-    <div class="body"><ul class="warn-list">${p.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div></section>`;
+    </table></details></section>`;
 
   if (p.run_log && p.run_log.length) html += log_section(p.run_log, false);
 
@@ -298,19 +302,19 @@ function render(d) {
   $('#out').innerHTML = html;
 }
 
-function render_resolution(rz) {
+// ── 2. TripJack Mapped Hotel details ──────────────────────────────
+function resolution_hotel(rz) {
   if (!rz) return '';
   if (!rz.available)
-    return `<section><h2>TripJack match</h2><div class="body muted">${esc(rz.note || 'unavailable')}</div></section>`;
+    return `<section><h2>TripJack Mapped Hotel</h2><div class="body muted">${esc(rz.note || 'unavailable')}</div></section>`;
 
-  const m = rz.match;
-  const found = !!m;
-  let head = `<section><h2>TripJack match
+  const m = rz.match, found = !!m;
+  let h = `<section><h2>TripJack Mapped Hotel details
       <span class="band ${found ? 'band-' + rz.band : 'band-none'}">${found ? esc(rz.band) : 'not found'}</span>
       <span class="muted" style="font-weight:400"> ${rz.ms} ms</span></h2><div class="body">`;
 
   if (found) {
-    head += `<div class="grid">
+    h += `<div class="grid">
       <div>tj_id</div><div class="mono" style="font-size:14px">${esc(m.tj_id)}</div>
       <div>unica_id</div><div class="mono">${val(m.unica_id)}</div>
       <div>Hotel name</div><div>${esc(m.hotel_name)}</div>
@@ -320,15 +324,13 @@ function render_resolution(rz) {
     </div>`;
   } else {
     const best = (rz.candidates || [])[0];
-    head += `<div class="muted">No confident match`
-      + (best ? ` — best candidate scored <span class="mono">${best.score}</span> (need ≥ 0.75).` : '.')
-      + `</div>`;
+    h += `<div class="muted">No confident match`
+      + (best ? ` — best candidate scored <span class="mono">${best.score}</span> (need ≥ 0.75).` : '.') + `</div>`;
   }
 
   if (rz.notes && rz.notes.length)
-    head += `<ul class="warn-list" style="margin-top:10px">${rz.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+    h += `<ul class="warn-list" style="margin-top:10px">${rz.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
 
-  // when nothing was confident enough, show the discarded candidates in full
   const cand = found ? (rz.candidates || []).slice(1) : (rz.candidates || []);
   if (cand.length) {
     const tbl = `<table><tr><th>tj_id</th><th>unica_id</th><th>name</th><th>locality · country</th><th>score</th><th>name</th><th>geo</th><th>dist</th></tr>
@@ -342,96 +344,108 @@ function render_resolution(rz) {
         <td class="mono muted">${c.geo_score!=null ? c.geo_score : ''}</td>
         <td class="mono muted">${c.distance_m!=null ? Math.round(c.distance_m)+'m' : ''}</td></tr>`).join('')}
       </table>`;
-    head += found
+    h += found
       ? `<details><summary>${cand.length} other candidate(s)</summary>${tbl}</details>`
       : `<div style="margin-top:10px"><div class="muted" style="margin-bottom:4px">discarded candidates (${cand.length}):</div>${tbl}</div>`;
   }
   if (rz.detail_request) {
     const dr = rz.detail_request;
-    head += `<details><summary>TripJack Detail request — POST ${esc(dr.url)}</summary>
+    h += `<details><summary>TripJack Detail request — POST ${esc(dr.url)}</summary>
       <pre class="raw">${esc(JSON.stringify(dr.body, null, 2))}</pre></details>`;
   } else if (rz.detail_request_error) {
-    head += `<div class="muted" style="margin-top:8px">Detail request not buildable: ${esc(rz.detail_request_error)}</div>`;
+    h += `<div class="muted" style="margin-top:8px">Detail request not buildable: ${esc(rz.detail_request_error)}</div>`;
   }
-  if (rz.detail) {
-    const dt = rz.detail, opts = dt.options || [];
-    head += `<div style="margin-top:14px"><h3 style="margin:0 0 6px">TripJack live options
-      <span class="muted" style="font-weight:400">· ${esc(dt.hotel_name||'')} · ${opts.length} option(s)</span></h3>`;
-    if (dt.notes && dt.notes.length)
-      head += `<ul class="warn-list">${dt.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
-    if (opts.length) {
-      head += `<table><tr><th>room</th><th>meal</th><th>refundable</th><th>free-cancel until</th><th>total</th><th>type</th></tr>
-        ${opts.map(o=>`<tr>
-          <td>${esc((o.rooms||[]).map(r=>r.name).join(' + ')||'—')}</td>
-          <td>${esc(o.meal_basis||'—')}</td>
-          <td>${o.refundable ? 'yes' : 'no'}</td>
-          <td class="muted">${val(o.free_cancel_until)}</td>
-          <td class="mono">${esc(o.currency||'')} ${o.total_price}</td>
-          <td class="mono muted">${esc(o.option_type||'')}</td></tr>`).join('')}
-        </table>`;
-    }
-    head += `<details><summary>raw pricing response</summary><pre class="raw">${esc(JSON.stringify(dt, null, 2))}</pre></details></div>`;
-  } else if (rz.detail_error) {
-    head += `<div class="muted" style="margin-top:8px">TripJack pricing call failed: ${esc(rz.detail_error)}</div>`;
+  h += `<details><summary>cascade trace</summary><pre class="raw">${esc((rz.layers||[]).join('\\n'))}</pre></details>`;
+  return h + `</div></section>`;
+}
+
+// ── 3. Room → rate-plan mapping ──────────────────────────────────
+function resolution_roommap(rz) {
+  if (!rz || !rz.available) return '';
+  if (!rz.room_map) {
+    if (rz.detail_error)
+      return `<section><h2>Room → rate-plan mapping</h2><div class="body muted">TripJack pricing call failed: ${esc(rz.detail_error)}</div></section>`;
+    return '';
   }
-  if (rz.room_map) {
-    const rm = rz.room_map;
-    head += `<div style="margin-top:14px"><h3 style="margin:0 0 6px">Room → rate-plan mapping
+  const rm = rz.room_map;
+  let h = `<section><h2>Room → rate-plan mapping
       <span class="band ${rm.matched ? 'band-'+(rm.band==='strong'?'high':'medium') : 'band-none'}">${rm.matched ? esc(rm.band) : 'no match'}</span>
-      ${rm.llm_used ? '<span class="muted" style="font-weight:400">· LLM tie-break</span>' : ''}</h3>`;
-    if (rm.matched)
-      head += `<div class="muted" style="margin-bottom:6px">room_type_id <span class="mono">${esc(rm.room_type_id)}</span> · score <span class="mono">${rm.score}</span>
-        ${rm.meal_filter ? '· meal <span class="mono">'+esc(rm.meal_filter)+'</span>' : ''}
-        ${rm.refundable_filter!=null ? '· '+(rm.refundable_filter?'refundable':'non-refundable') : ''}</div>`;
-    if (rm.view_flag)
-      head += `<div class="muted" style="margin-bottom:6px">⚑ ${esc(rm.view_flag)}</div>`;
-    const rmNotes = (rm.notes||[]).filter(n => n !== rm.view_flag);
-    if (rmNotes.length)
-      head += `<ul class="warn-list">${rmNotes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
-    // ── TripJack results for the matched room_type_id (on top) ──
-    if ((rm.rate_options||[]).length) {
-      const rk = new Set(rm.ratekey_option_ids||[]);
-      head += `<div class="muted" style="margin:10px 0 4px">TripJack — all ${rm.rate_options.length} option(s) for this room type${rk.size ? ' · '+rk.size+' match the requested rate plan (highlighted)' : ''}</div>`;
-      head += `<table><tr><th>optionId</th><th>room</th><th>meal</th><th>refund</th><th>total</th><th>tags</th></tr>
-        ${rm.rate_options.map(o=>`<tr${rk.has(o.option_id) ? ' style="background:rgba(74,170,110,.16)"' : ''}>
-          <td class="mono">${esc((o.option_id||'').slice(0,8))}</td>
-          <td>${esc(o.room_name)}</td>
-          <td>${esc(o.meal_basis)}</td>
-          <td>${o.refundable ? 'yes' : 'no'}</td>
-          <td class="mono">${esc(o.currency)} ${o.total_price}</td>
-          <td class="muted">${(o.tags||[]).map(esc).join(', ')}</td></tr>`).join('')}
-        </table>`;
-    }
-    // ── our price (OTA benchmark) underneath, for comparison ──
-    if (rm.our_price) {
-      const p = rm.our_price, cur = esc(p.currency||'');
-      const rows = [['Room', esc(p.room_name||'—')],
-        ['Meal / cancel', esc([p.meal_plan, p.cancellation].filter(Boolean).join(' · ')||'—')]];
-      if (p.subtotal!=null) rows.push(['Subtotal', cur+' '+p.subtotal]);
-      if (p.taxes!=null) rows.push(['Taxes', cur+' '+p.taxes]);
-      if (p.discount!=null) rows.push(['Discount', cur+' '+p.discount]);
-      rows.push(['Final payable', '<b>'+cur+' '+p.final_payable+'</b>']);
-      let delta = '';
-      const rkOpts = (rm.rate_options||[]).filter(o=>(rm.ratekey_option_ids||[]).includes(o.option_id));
-      if (rkOpts.length && p.final_payable) {
-        const best = Math.min(...rkOpts.map(o=>o.total_price));
-        const diff = best - p.final_payable, pct = diff/p.final_payable*100;
-        delta = `<div class="muted" style="margin-top:6px">best matching TripJack rate <span class="mono">${cur} ${best}</span> —
-          <span class="mono" style="color:${diff<=0?'#4a4':'#c66'}">${diff<=0?'':'+'}${cur} ${Math.round(diff)} (${pct>=0?'+':''}${pct.toFixed(1)}%)</span> vs our price</div>`;
-      }
-      head += `<div class="muted" style="margin:12px 0 4px">Our price (OTA benchmark)</div>
-        <table>${rows.map(kv=>`<tr><td>${kv[0]}</td><td class="mono">${kv[1]}</td></tr>`).join('')}</table>${delta}`;
-    }
-    head += `<details><summary>all ${(rm.ranked_buckets||[]).length} room-type buckets (ranked)</summary>
-      <table><tr><th>room_type_id</th><th>best-matched name</th><th>score</th><th>band</th><th>#opt</th></tr>
-      ${(rm.ranked_buckets||[]).map(b=>`<tr>
-        <td class="mono">${esc(b.room_type_id)}</td><td>${esc(b.canonical)}</td>
-        <td class="mono">${b.score}</td><td class="muted">${esc(b.band)}</td>
-        <td class="mono">${b.n_options}</td></tr>`).join('')}
-      </table></details></div>`;
+      ${rm.llm_used ? '<span class="muted" style="font-weight:400">· LLM tie-break</span>' : ''}</h2><div class="body">`;
+
+  if (rm.matched)
+    h += `<div class="muted" style="margin-bottom:6px">room_type_id <span class="mono">${esc(rm.room_type_id)}</span> · score <span class="mono">${rm.score}</span>
+      ${rm.meal_filter ? '· meal <span class="mono">'+esc(rm.meal_filter)+'</span>' : ''}
+      ${rm.refundable_filter!=null ? '· '+(rm.refundable_filter?'refundable':'non-refundable') : ''}</div>`;
+  if (rm.view_flag)
+    h += `<div class="muted" style="margin-bottom:6px">⚑ ${esc(rm.view_flag)}</div>`;
+  const rmNotes = (rm.notes||[]).filter(n => n !== rm.view_flag);
+  if (rmNotes.length)
+    h += `<ul class="warn-list">${rmNotes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+
+  // TripJack results for the matched room_type_id — on top
+  if ((rm.rate_options||[]).length) {
+    const rk = new Set(rm.ratekey_option_ids||[]);
+    h += `<div class="muted" style="margin:10px 0 4px">TripJack — all ${rm.rate_options.length} option(s) for this room type${rk.size ? ' · '+rk.size+' match the requested rate plan (highlighted)' : ''}</div>`;
+    h += `<table><tr><th>optionId</th><th>room</th><th>meal</th><th>refund</th><th>total</th><th>tags</th></tr>
+      ${rm.rate_options.map(o=>`<tr${rk.has(o.option_id) ? ' style="background:rgba(74,170,110,.16)"' : ''}>
+        <td class="mono">${esc((o.option_id||'').slice(0,8))}</td>
+        <td>${esc(o.room_name)}</td>
+        <td>${esc(o.meal_basis)}</td>
+        <td>${o.refundable ? 'yes' : 'no'}</td>
+        <td class="mono">${esc(o.currency)} ${o.total_price}</td>
+        <td class="muted">${(o.tags||[]).map(esc).join(', ')}</td></tr>`).join('')}
+      </table>`;
   }
-  head += `</div><details><summary>cascade trace</summary><pre class="raw">${esc((rz.layers||[]).join('\\n'))}</pre></details>`;
-  return head + `</section>`;
+  // our price (OTA benchmark) — underneath
+  if (rm.our_price) {
+    const p = rm.our_price, cur = esc(p.currency||'');
+    const rows = [['Room', esc(p.room_name||'—')],
+      ['Meal / cancel', esc([p.meal_plan, p.cancellation].filter(Boolean).join(' · ')||'—')]];
+    if (p.subtotal!=null) rows.push(['Subtotal', cur+' '+p.subtotal]);
+    if (p.taxes!=null) rows.push(['Taxes', cur+' '+p.taxes]);
+    if (p.discount!=null) rows.push(['Discount', cur+' '+p.discount]);
+    rows.push(['Final payable', '<b>'+cur+' '+p.final_payable+'</b>']);
+    let delta = '';
+    const rkOpts = (rm.rate_options||[]).filter(o=>(rm.ratekey_option_ids||[]).includes(o.option_id));
+    if (rkOpts.length && p.final_payable) {
+      const best = Math.min(...rkOpts.map(o=>o.total_price));
+      const diff = best - p.final_payable, pct = diff/p.final_payable*100;
+      delta = `<div class="muted" style="margin-top:6px">best matching TripJack rate <span class="mono">${cur} ${best}</span> —
+        <span class="mono" style="color:${diff<=0?'#4a4':'#c66'}">${diff<=0?'':'+'}${cur} ${Math.round(diff)} (${pct>=0?'+':''}${pct.toFixed(1)}%)</span> vs our price</div>`;
+    }
+    h += `<div class="muted" style="margin:12px 0 4px">Our price (OTA benchmark)</div>
+      <table>${rows.map(kv=>`<tr><td>${kv[0]}</td><td class="mono">${kv[1]}</td></tr>`).join('')}</table>${delta}`;
+  }
+  h += `<details><summary>all ${(rm.ranked_buckets||[]).length} room-type buckets (ranked)</summary>
+    <table><tr><th>room_type_id</th><th>best-matched name</th><th>score</th><th>band</th><th>#opt</th></tr>
+    ${(rm.ranked_buckets||[]).map(b=>`<tr>
+      <td class="mono">${esc(b.room_type_id)}</td><td>${esc(b.canonical)}</td>
+      <td class="mono">${b.score}</td><td class="muted">${esc(b.band)}</td>
+      <td class="mono">${b.n_options}</td></tr>`).join('')}
+    </table></details>`;
+  return h + `</div></section>`;
+}
+
+// ── collapsible: the full TripJack pricing option list ───────────
+function resolution_live_options(rz) {
+  if (!rz || !rz.available || !rz.detail) return '';
+  const dt = rz.detail, opts = dt.options || [];
+  let h = `<section><details><summary>TripJack live options · ${esc(dt.hotel_name||'')} · ${opts.length} option(s)</summary>`;
+  if (dt.notes && dt.notes.length)
+    h += `<ul class="warn-list">${dt.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+  if (opts.length) {
+    h += `<table><tr><th>room</th><th>meal</th><th>refundable</th><th>free-cancel until</th><th>total</th><th>type</th></tr>
+      ${opts.map(o=>`<tr>
+        <td>${esc((o.rooms||[]).map(r=>r.name).join(' + ')||'—')}</td>
+        <td>${esc(o.meal_basis||'—')}</td>
+        <td>${o.refundable ? 'yes' : 'no'}</td>
+        <td class="muted">${val(o.free_cancel_until)}</td>
+        <td class="mono">${esc(o.currency||'')} ${o.total_price}</td>
+        <td class="mono muted">${esc(o.option_type||'')}</td></tr>`).join('')}
+      </table>`;
+  }
+  h += `<details><summary>raw pricing response</summary><pre class="raw">${esc(JSON.stringify(dt, null, 2))}</pre></details>`;
+  return h + `</details></section>`;
 }
 </script>
 </body>
