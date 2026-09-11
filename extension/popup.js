@@ -55,7 +55,22 @@ function collectFromTab(tabId) {
   });
 }
 
-function poll(jobId, tabId) {
+// run_log entries carry `ms` = milliseconds since extraction started (set
+// server-side in BookingIntent.log()). Rendered here as seconds, with the
+// per-step delta — how long THAT step took, not just the running total.
+function renderSteps(runLog, totalSec) {
+  if (!runLog || !runLog.length) return "";
+  let prevMs = 0;
+  const lines = runLog.map((l) => {
+    const deltaSec = ((l.ms - prevMs) / 1000).toFixed(1);
+    prevMs = l.ms;
+    return `<div class="step"><span class="t">+${deltaSec}s</span>${esc(l.msg)}</div>`;
+  }).join("");
+  return `<details style="margin-top:8px"><summary>Steps — ${runLog.length}, ${totalSec.toFixed(1)}s total</summary>
+    <div class="steps">${lines}</div></details>`;
+}
+
+function poll(jobId, tabId, startedAt) {
   const t = setInterval(async () => {
     let s;
     try {
@@ -63,26 +78,28 @@ function poll(jobId, tabId) {
     } catch (e) {
       return;                                   // panel not reachable yet — keep trying
     }
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     if (!s.done) {
-      $status.textContent = `Extracting… (${(s.log || []).length} step(s))`;
+      $status.textContent = `Extracting… ${elapsed}s (${(s.log || []).length} step(s))`;
       return;
     }
     clearInterval(t);
     $go.disabled = false;
     if (s.error) {
-      $status.textContent = "Failed: " + s.error;
+      $status.textContent = `Failed after ${elapsed}s: ` + s.error;
       return;
     }
-    render(s.result, tabId);
+    render(s.result, tabId, parseFloat(elapsed));
   }, 500);
 }
 
-function render(result, tabId) {
+function render(result, tabId, totalSec) {
   const p = result.packet;
   const rz = result.resolution || {};
   const ok = p.status === "ok";
-  $status.textContent = ok ? "✓ Extracted"
-    : "✗ Missing: " + (p.missing_mandatory || []).join(", ") + " — try pasting the page in the full panel.";
+  const timeTxt = totalSec != null ? ` in ${totalSec.toFixed(1)}s` : "";
+  $status.textContent = ok ? `✓ Extracted${timeTxt}`
+    : `✗ Missing${timeTxt}: ` + (p.missing_mandatory || []).join(", ") + " — try pasting the page in the full panel.";
 
   const rows = [
     ["Hotel", p.hotel.name || "—"],
@@ -130,26 +147,39 @@ function render(result, tabId) {
         mealBasis: best.meal_basis,
         refundable: best.refundable,
       }, (resp) => {
-        if (chrome.runtime.lastError) return;      // tab navigated away — ignore
-        if (!resp || !resp.placed) {
+        if (chrome.runtime.lastError) {
+          // most likely: the extension/tab needs a reload after an update
           const note = document.createElement("div");
-          note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
-          note.textContent = "(could not place the price card on the page — "
-            + "the OTA price text wasn't matched)";
+          note.style.cssText = "margin-top:6px;color:#f87171;font-size:11px;";
+          note.textContent = "Card not shown — reload this tab (and the extension "
+            + "if it was just updated) and try again.";
           $out.appendChild(note);
+          return;
         }
+        const note = document.createElement("div");
+        note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
+        if (!resp || !resp.placed) {
+          note.textContent = "Card not shown on the page.";
+        } else if (resp.mode === "floating") {
+          note.textContent = "Card shown bottom-right — couldn't match the exact "
+            + "price text on this page to sit beside.";
+        } else {
+          return;                                  // placed inline, nothing to say
+        }
+        $out.appendChild(note);
       });
     }
   }
 
   $out.innerHTML = rows.map(([k, v]) =>
     `<div class="row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`
-  ).join("");
+  ).join("") + renderSteps(p.run_log, totalSec ?? 0);
   $link.href = BASE;
   $link.style.display = "block";
 }
 
 async function extractCurrentTab() {
+  const startedAt = Date.now();
   $go.disabled = true;
   $out.innerHTML = "";
   $link.style.display = "none";
@@ -199,7 +229,7 @@ async function extractCurrentTab() {
   }
 
   $status.textContent = "Extracting…";
-  poll(jobId, tab.id);
+  poll(jobId, tab.id, startedAt);
 }
 
 $go.addEventListener("click", extractCurrentTab);

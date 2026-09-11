@@ -64,7 +64,7 @@
   // never leak out. Same reason we don't use selectors: this has to look
   // right next to ANY site's price, unstyled by that site.
   function buildCard({ ourPrice, ourCurrency, tjPrice, tjCurrency, band, tags,
-                       roomName, mealBasis, refundable }) {
+                       roomName, mealBasis, refundable }, floating) {
     const diff = tjPrice - ourPrice;
     const pct = ourPrice ? (diff / ourPrice) * 100 : 0;
     const cheaper = diff <= 0;
@@ -77,16 +77,22 @@
 
     const host = document.createElement("span");
     host.className = "yta-price-card-host";
+    // when we couldn't find the OTA's price text to sit beside, still
+    // GUARANTEE the comparison is visible somewhere — pin it to a corner
+    // instead of silently placing nothing.
+    if (floating) {
+      host.style.cssText = "position:fixed;bottom:18px;right:18px;z-index:2147483647;";
+    }
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
         :host { all: initial; }
         .card { display: inline-flex; flex-direction: column; gap: 3px;
-          margin-left: 8px; padding: 7px 10px; min-width: 172px; max-width: 260px;
+          margin-left: ${floating ? "0" : "8px"}; padding: 7px 10px; min-width: 172px; max-width: 260px;
           border-radius: 8px; background: #f0fdf4; border: 1px solid #86efac;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           font-size: 12px; color: #14532d; vertical-align: middle;
-          box-shadow: 0 1px 4px rgba(0,0,0,.15); position: relative; }
+          box-shadow: 0 2px 10px rgba(0,0,0,.25); position: relative; }
         .head { display: flex; justify-content: space-between; align-items: center; }
         .brand { font-weight: 700; font-size: 11px; letter-spacing: .02em; color: #166534; }
         .band { display: inline-block; padding: 0 5px; border-radius: 4px; margin-left: 4px;
@@ -102,6 +108,7 @@
         .diff.down { color: #15803d; }
         .meta { font-size: 10.5px; color: #4d7c58; opacity: .85;
           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .floatnote { font-size: 9.5px; color: #6b8f73; }
       </style>
       <div class="card">
         <div class="head">
@@ -112,6 +119,7 @@
         <div class="row tj"><span class="k">TripJack</span><span class="v">${escapeHtml(tjCurrency || ourCurrency || "")} ${escapeHtml(tjPrice)}</span></div>
         <div class="diff ${cheaper ? "down" : "up"}">${escapeHtml(diffTxt)}</div>
         ${meta ? `<div class="meta" title="${meta}">${meta}</div>` : ""}
+        ${floating ? `<div class="floatnote">(couldn't find this exact price on the page)</div>` : ""}
       </div>`;
     shadow.querySelector(".close").addEventListener("click", () => host.remove());
     if (tags && tags.length) host.title = tags.join(", ");
@@ -121,14 +129,19 @@
   function showPriceCard(msg) {
     if (ytaLastCard && ytaLastCard.parentNode) ytaLastCard.remove();
     const el = findPriceElement(msg.ourPrice);
-    if (!el) return { ok: false, placed: false, reason: "price text not found on page" };
-
-    const card = buildCard(msg);
-    el.insertAdjacentElement
-      ? el.insertAdjacentElement("afterend", card)
-      : el.parentNode.insertBefore(card, el.nextSibling);
+    if (el) {
+      const card = buildCard(msg, false);
+      el.insertAdjacentElement
+        ? el.insertAdjacentElement("afterend", card)
+        : el.parentNode.insertBefore(card, el.nextSibling);
+      ytaLastCard = card;
+      return { ok: true, placed: true, mode: "inline" };
+    }
+    // fallback: always show SOMETHING rather than silently nothing
+    const card = buildCard(msg, true);
+    document.body.appendChild(card);
     ytaLastCard = card;
-    return { ok: true, placed: true };
+    return { ok: true, placed: true, mode: "floating" };
   }
 
   // -- messaging ----------------------------------------------------
