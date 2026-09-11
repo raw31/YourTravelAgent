@@ -65,11 +65,12 @@
   // right next to ANY site's price, unstyled by that site.
   function buildCard({ ourPrice, ourCurrency, tjPrice, tjCurrency, band, tags,
                        roomName, mealBasis, refundable }, floating) {
-    const diff = tjPrice - ourPrice;
-    const pct = ourPrice ? (diff / ourPrice) * 100 : 0;
+    const haveOurPrice = ourPrice != null && isFinite(ourPrice);
+    const diff = haveOurPrice ? tjPrice - ourPrice : 0;
+    const pct = haveOurPrice && ourPrice ? (diff / ourPrice) * 100 : 0;
     const cheaper = diff <= 0;
-    const diffTxt = cheaper
-      ? `▼ ${Math.abs(pct).toFixed(1)}% cheaper`
+    const diffTxt = !haveOurPrice ? ""
+      : cheaper ? `▼ ${Math.abs(pct).toFixed(1)}% cheaper`
       : `▲ ${pct.toFixed(1)}% more`;
     const meta = [roomName, mealBasis,
                  refundable === true ? "refundable" : refundable === false ? "non-refundable" : null]
@@ -115,11 +116,11 @@
           <span class="brand">YourTravelAgent${band ? `<span class="band">${escapeHtml(band)}</span>` : ""}</span>
           <button class="close" title="dismiss">✕</button>
         </div>
-        <div class="row"><span class="k">This page</span><span class="v">${escapeHtml(ourCurrency || "")} ${escapeHtml(ourPrice)}</span></div>
+        <div class="row"><span class="k">This page</span><span class="v">${haveOurPrice ? escapeHtml(ourCurrency || "") + " " + escapeHtml(ourPrice) : "—"}</span></div>
         <div class="row tj"><span class="k">TripJack</span><span class="v">${escapeHtml(tjCurrency || ourCurrency || "")} ${escapeHtml(tjPrice)}</span></div>
-        <div class="diff ${cheaper ? "down" : "up"}">${escapeHtml(diffTxt)}</div>
+        ${diffTxt ? `<div class="diff ${cheaper ? "down" : "up"}">${escapeHtml(diffTxt)}</div>` : ""}
         ${meta ? `<div class="meta" title="${meta}">${meta}</div>` : ""}
-        ${floating ? `<div class="floatnote">(couldn't find this exact price on the page)</div>` : ""}
+        ${floating ? `<div class="floatnote">(${haveOurPrice ? "couldn't find this exact price on the page" : "OTA price wasn't extracted from this page"})</div>` : ""}
       </div>`;
     shadow.querySelector(".close").addEventListener("click", () => host.remove());
     if (tags && tags.length) host.title = tags.join(", ");

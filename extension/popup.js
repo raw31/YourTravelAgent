@@ -4,10 +4,22 @@
 // pipeline. `page_data` just takes priority over Playwright render there.
 const BASE = "http://127.0.0.1:8765";
 
+// TODO: set this to your own WhatsApp number (country code + number, no
+// spaces/+/dashes — e.g. "919876543210") or a full https://wa.me/... link.
+// Left blank ships safely: the book-with-me button still works, it just
+// opens plain wa.me with no pre-selected contact until this is set.
+const WHATSAPP_NUMBER = "";
+
 const $status = document.getElementById("status");
 const $out = document.getElementById("out");
 const $go = document.getElementById("go");
 const $link = document.getElementById("panelLink");
+const $bookBtn = document.getElementById("bookBtn");
+const $bookPanel = document.getElementById("bookPanel");
+const $bookSummary = document.getElementById("bookSummary");
+const $waLink = document.getElementById("waLink");
+
+let lastDeal = null;   // populated by render() whenever TripJack matches a rate
 
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => (
@@ -118,6 +130,16 @@ function render(result, tabId, totalSec) {
   }
 
   const best = rz.room_map && rz.room_map.matched ? pickBestOption(rz.room_map) : null;
+  lastDeal = best ? {
+    hotelName: p.hotel.name, checkIn: p.stay.check_in, checkOut: p.stay.check_out,
+    occupancy: occRepr(p.stay.occupancy), roomName: best.room_name,
+    mealBasis: best.meal_basis, refundable: best.refundable,
+    tjPrice: best.total_price, tjCurrency: best.currency,
+    ourPrice: p.ota_benchmark.final_payable, ourCurrency: p.ota_benchmark.currency,
+    url: p.source && p.source.url,
+  } : null;
+  $bookBtn.style.display = lastDeal ? "block" : "none";
+  $bookPanel.style.display = "none";
   if (!best && rz.available && rz.match) {
     // hotel matched in TripJack but no price came through — say why instead
     // of silently showing nothing (pricing outage, IP-allowlist rejection,
@@ -134,41 +156,48 @@ function render(result, tabId, totalSec) {
       `<span class="band band-${band === "strong" ? "high" : "medium"}">${band}</span> ` +
       `${esc(best.currency)} ${best.total_price}`]);
 
-    if (p.ota_benchmark.final_payable) {
-      chrome.tabs.sendMessage(tabId, {
-        type: "yta:showPrice",
-        ourPrice: p.ota_benchmark.final_payable,
-        ourCurrency: p.ota_benchmark.currency,
-        tjPrice: best.total_price,
-        tjCurrency: best.currency,
-        band: rz.room_map.band,
-        tags: best.tags,
-        roomName: best.room_name,
-        mealBasis: best.meal_basis,
-        refundable: best.refundable,
-      }, (resp) => {
-        if (chrome.runtime.lastError) {
-          // most likely: the extension/tab needs a reload after an update
-          const note = document.createElement("div");
-          note.style.cssText = "margin-top:6px;color:#f87171;font-size:11px;";
-          note.textContent = "Card not shown — reload this tab (and the extension "
-            + "if it was just updated) and try again.";
-          $out.appendChild(note);
-          return;
-        }
+    // Always attempt the on-page card once TJ has returned a matched,
+    // priced option — do NOT additionally require the OTA's own price to
+    // have been extracted. (Bug: this used to be gated on
+    // `p.ota_benchmark.final_payable`, so a run where TJ pricing succeeded
+    // but final_payable itself happened to be one of the missing fields —
+    // possible since resolve/pricing only needs hotel.name, not a fully
+    // "ok" packet — silently sent no message at all: no card, no error,
+    // nothing. showPriceCard() below handles a missing ourPrice by always
+    // floating instead of trying to locate it on the page.)
+    chrome.tabs.sendMessage(tabId, {
+      type: "yta:showPrice",
+      ourPrice: p.ota_benchmark.final_payable ?? null,
+      ourCurrency: p.ota_benchmark.currency,
+      tjPrice: best.total_price,
+      tjCurrency: best.currency,
+      band: rz.room_map.band,
+      tags: best.tags,
+      roomName: best.room_name,
+      mealBasis: best.meal_basis,
+      refundable: best.refundable,
+    }, (resp) => {
+      if (chrome.runtime.lastError) {
+        // most likely: the extension/tab needs a reload after an update
         const note = document.createElement("div");
-        note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
-        if (!resp || !resp.placed) {
-          note.textContent = "Card not shown on the page.";
-        } else if (resp.mode === "floating") {
-          note.textContent = "Card shown bottom-right — couldn't match the exact "
-            + "price text on this page to sit beside.";
-        } else {
-          return;                                  // placed inline, nothing to say
-        }
+        note.style.cssText = "margin-top:6px;color:#f87171;font-size:11px;";
+        note.textContent = "Card not shown — reload this tab (and the extension "
+          + "if it was just updated) and try again.";
         $out.appendChild(note);
-      });
-    }
+        return;
+      }
+      const note = document.createElement("div");
+      note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
+      if (!resp || !resp.placed) {
+        note.textContent = "Card not shown on the page" + (resp && resp.error ? `: ${resp.error}` : ".");
+      } else if (resp.mode === "floating") {
+        note.textContent = "Card shown bottom-right — couldn't match the exact "
+          + "price text on this page to sit beside.";
+      } else {
+        return;                                  // placed inline, nothing to say
+      }
+      $out.appendChild(note);
+    });
   }
 
   $out.innerHTML = rows.map(([k, v]) =>
@@ -183,6 +212,9 @@ async function extractCurrentTab() {
   $go.disabled = true;
   $out.innerHTML = "";
   $link.style.display = "none";
+  $bookBtn.style.display = "none";
+  $bookPanel.style.display = "none";
+  lastDeal = null;
   $status.textContent = "Reading the page…";
 
   const tab = await getActiveTab();
@@ -233,3 +265,37 @@ async function extractCurrentTab() {
 }
 
 $go.addEventListener("click", extractCurrentTab);
+
+// "Book this rate with me" — build a human-readable summary of the matched
+// deal and hand it to the user as a pre-filled WhatsApp message. This is
+// deliberately NOT a real booking flow (no payment, no PII collection,
+// nothing sent anywhere automatically) — it just saves the user retyping
+// the details when they message the person who'll book it for them.
+function dealSummaryText(d) {
+  const meal = [d.mealBasis, d.refundable === true ? "refundable"
+    : d.refundable === false ? "non-refundable" : null].filter(Boolean).join(" · ");
+  const savings = (d.ourPrice != null)
+    ? `\n💰 Best rate: ${d.tjCurrency} ${d.tjPrice}  (page showed: ${d.ourCurrency || ""} ${d.ourPrice})`
+    : `\n💰 Best rate: ${d.tjCurrency} ${d.tjPrice}`;
+  return `Hi! I'd like to book this via YourTravelAgent 🧳\n\n`
+    + `🏨 ${d.hotelName || "—"}\n`
+    + `🛏️ ${d.roomName || "—"}${meal ? " · " + meal : ""}\n`
+    + `📅 ${d.checkIn || "?"} → ${d.checkOut || "?"}\n`
+    + `👥 ${d.occupancy || "—"}` + savings
+    + (d.url ? `\n\nOriginal page: ${d.url}` : "")
+    + `\n\nPlease confirm and book this for me.`;
+}
+
+function waLink(text) {
+  const digits = (WHATSAPP_NUMBER || "").replace(/\D/g, "");
+  const base = digits ? `https://wa.me/${digits}` : "https://wa.me/";
+  return `${base}?text=${encodeURIComponent(text)}`;
+}
+
+$bookBtn.addEventListener("click", () => {
+  if (!lastDeal) return;
+  const text = dealSummaryText(lastDeal);
+  $bookSummary.textContent = text;
+  $waLink.href = waLink(text);
+  $bookPanel.style.display = "block";
+});

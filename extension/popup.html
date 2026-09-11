@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>YourTravelAgent</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         width: 340px; margin: 0; padding: 14px; background: #0d1117; color: #e6edf3; }
+  h1 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+  button { width: 100%; padding: 9px; background: #2563eb; color: #fff; border: none;
+           border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #374151; cursor: default; }
+  #status { margin-top: 8px; color: #9ca3af; font-size: 12px; min-height: 16px; line-height: 1.4; }
+  #out { margin-top: 6px; }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0;
+         border-bottom: 1px solid #21262d; font-size: 12px; }
+  .row:last-child { border-bottom: none; }
+  .k { color: #8b949e; flex: 0 0 auto; }
+  .v { text-align: right; word-break: break-word; }
+  .band { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .band-high { background: #12261c; color: #4ade80; }
+  .band-medium { background: #2a2412; color: #facc15; }
+  .band-none { background: #2a1414; color: #f87171; }
+  #panelLink { display: none; margin-top: 10px; color: #58a6ff; font-size: 12px; text-decoration: none; }
+  #panelLink:hover { text-decoration: underline; }
+  details summary { cursor: pointer; color: #8b949e; font-size: 11px; padding: 2px 0; }
+  .steps { max-height: 160px; overflow-y: auto; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .step { display: flex; gap: 6px; font-size: 10.5px; color: #c9d1d9; padding: 2px 0; border-bottom: 1px solid #161b22; }
+  .step .t { color: #58a6ff; flex: 0 0 auto; min-width: 40px; }
+  #bookBtn { display: none; margin-top: 10px; background: #16a34a; }
+  #bookBtn:hover { background: #15803d; }
+  #bookPanel { display: none; margin-top: 10px; padding: 10px; border-radius: 8px;
+               background: #0f2418; border: 1px solid #1e4a2f; }
+  #bookSummary { white-space: pre-wrap; font-size: 11.5px; color: #d1f2dd; line-height: 1.5;
+                 margin-bottom: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #waLink { display: block; text-align: center; padding: 8px; border-radius: 6px;
+            background: #25D366; color: #04140a; font-weight: 700; font-size: 12.5px;
+            text-decoration: none; }
+  #waLink:hover { background: #1fb057; }
+</style>
+</head>
+<body>
+  <h1>YourTravelAgent</h1>
+  <button id="go">Extract this page</button>
+  <div id="status">Open an OTA hotel / checkout page, then click Extract.</div>
+  <div id="out"></div>
+  <button id="bookBtn">📩 Book this rate with me</button>
+  <div id="bookPanel">
+    <div id="bookSummary"></div>
+    <a id="waLink" target="_blank">Send on WhatsApp →</a>
+  </div>
+  <a id="panelLink" target="_blank">Open full debug panel →</a>
+  <script src="popup.js"></script>
+</body>
+</html>
