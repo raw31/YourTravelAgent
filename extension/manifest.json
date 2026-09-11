@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YourTravelAgent — OTA Extractor",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Reads hotel name, dates, occupancy and room/price straight from the OTA tab you have open (real, logged-in session), sends it to the local YourTravelAgent pipeline, drops a YourTravelAgent price-comparison card right next to the OTA's own price on the page, and lets the user book the matched rate over WhatsApp with a configurable markup.",
   "action": {
     "default_popup": "popup.html",

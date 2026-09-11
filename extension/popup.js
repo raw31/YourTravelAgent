@@ -114,22 +114,24 @@ function collectFromTab(tabId) {
   });
 }
 
-// run_log entries carry `ms` = milliseconds since extraction started (set
-// server-side in BookingIntent.log()). Rendered here as seconds, with the
-// per-step delta — how long THAT step took, not just the running total.
-function renderSteps(runLog, totalSec) {
-  if (!runLog || !runLog.length) return "";
+// Renders any {ms, msg} list where `ms` is cumulative milliseconds since
+// the extraction started (click time) — the per-step delta shown is how
+// long THAT step took, not just the running total. Used for the combined
+// client+server timeline built in render() below, so every step of the
+// whole flow is accounted for, not just the server-side ones.
+function renderSteps(steps, totalSec) {
+  if (!steps || !steps.length) return "";
   let prevMs = 0;
-  const lines = runLog.map((l) => {
+  const lines = steps.map((l) => {
     const deltaSec = ((l.ms - prevMs) / 1000).toFixed(1);
     prevMs = l.ms;
     return `<div class="step"><span class="t">+${deltaSec}s</span>${esc(l.msg)}</div>`;
   }).join("");
-  return `<details style="margin-top:8px"><summary>Steps — ${runLog.length}, ${totalSec.toFixed(1)}s total</summary>
+  return `<details style="margin-top:8px"><summary>Steps — ${steps.length}, ${totalSec.toFixed(1)}s total</summary>
     <div class="steps">${lines}</div></details>`;
 }
 
-function poll(jobId, tabId, startedAt) {
+function poll(jobId, tabId, startedAt, clientMs) {
   const t = setInterval(async () => {
     let s;
     try {
@@ -148,11 +150,11 @@ function poll(jobId, tabId, startedAt) {
       $status.textContent = `Failed after ${elapsed}s: ` + s.error;
       return;
     }
-    render(s.result, tabId, parseFloat(elapsed));
+    render(s.result, tabId, parseFloat(elapsed), clientMs);
   }, 500);
 }
 
-function render(result, tabId, totalSec) {
+function render(result, tabId, totalSec, clientMs) {
   const p = result.packet;
   const rz = result.resolution || {};
   const ok = p.status === "ok";
@@ -265,9 +267,31 @@ function render(result, tabId, totalSec) {
     });
   }
 
+  // Build ONE combined timeline covering the whole click-to-result flow —
+  // not just the server-side pipeline (p.run_log). p.run_log's own `ms` is
+  // relative to when the BookingIntent was created on the server, which is
+  // AFTER the page was read in the tab and AFTER the network round trip to
+  // POST it — both real time the old Steps list silently folded into
+  // whichever server step happened to log first. Offsetting run_log by
+  // that client-side time (and appending a residual for polling/network
+  // lag at the very end) means every millisecond of the total is
+  // attributed to some named step, none of it hidden.
+  const clientOffset = clientMs ? clientMs.read + clientMs.post : 0;
+  const steps = [];
+  if (clientMs) {
+    steps.push({ ms: clientMs.read, msg: "reading the page from the tab (client-side)" });
+    steps.push({ ms: clientOffset, msg: "sending captured data to the local pipeline (network)" });
+  }
+  for (const l of (p.run_log || [])) steps.push({ ms: l.ms + clientOffset, msg: l.msg });
+  const totalMs = (totalSec ?? 0) * 1000;
+  const lastMs = steps.length ? steps[steps.length - 1].ms : 0;
+  if (totalMs - lastMs > 50) {
+    steps.push({ ms: totalMs, msg: "waiting on the job-status poll (network)" });
+  }
+
   $out.innerHTML = rows.map(([k, v]) =>
     `<div class="row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`
-  ).join("") + renderSteps(p.run_log, totalSec ?? 0);
+  ).join("") + renderSteps(steps, totalSec ?? 0);
   $link.href = BASE;
   $link.style.display = "block";
 }
@@ -297,8 +321,10 @@ async function extractCurrentTab() {
     $go.disabled = false;
     return;
   }
+  const readMs = Date.now() - startedAt;
 
   $status.textContent = "Sending to the local panel…";
+  const tPostStart = Date.now();
   const body = {
     url: tab.url,
     render: false,
@@ -324,9 +350,10 @@ async function extractCurrentTab() {
     $go.disabled = false;
     return;
   }
+  const postMs = Date.now() - tPostStart;
 
   $status.textContent = "Extracting…";
-  poll(jobId, tab.id, startedAt);
+  poll(jobId, tab.id, startedAt, { read: readMs, post: postMs });
 }
 
 $go.addEventListener("click", extractCurrentTab);
