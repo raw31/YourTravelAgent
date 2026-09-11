@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "YourTravelAgent — OTA Extractor",
+  "version": "0.1.0",
+  "description": "Reads hotel name, dates, occupancy and room/price straight from the OTA tab you have open (real, logged-in session) and sends it to the local YourTravelAgent pipeline.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Extract this OTA page"
+  },
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["capture.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

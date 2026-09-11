@@ -34,6 +34,12 @@ def _run_job(job_id: str, req: dict) -> None:
         do_render = bool(req.get("render", True))
         paste = (req.get("paste") or "").strip() or None
         uploads = req.get("files") or []
+        # page_data: the Chrome extension's capture — {text, html, json_ld,
+        # xhr_json, final_url} from the live authenticated tab. Same shape
+        # render() produces; pipeline.extract() gives it priority. Reuses
+        # this exact job runner / endpoint — no separate path for the
+        # extension, the panel UI and the extension both post here.
+        page_data = req.get("page_data") or None
 
         media = None
         if uploads:
@@ -44,15 +50,16 @@ def _run_job(job_id: str, req: dict) -> None:
                 for u in uploads if u.get("b64")
             ])
 
-        if not media and (not urlparse(url).scheme or not urlparse(url).netloc):
+        if not media and not page_data and (not urlparse(url).scheme or not urlparse(url).netloc):
             job["error"] = "Enter an absolute http(s) URL, or attach a PDF / screenshot"
             return
 
         is_html = bool(paste) and paste.lstrip()[:1] == "<"
         packet = extract(
             url, render=do_render, media=media, log_sink=job["log"],
-            page_html=paste if (is_html and not media) else None,
-            page_text=paste if (paste and not is_html and not media) else None,
+            page_html=paste if (is_html and not media and not page_data) else None,
+            page_text=paste if (paste and not is_html and not media and not page_data) else None,
+            page_data=page_data,
         )
 
         resolution = None
@@ -519,8 +526,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # CORS: lets the Chrome extension (chrome-extension://… origin) call
+        # this same localhost API the panel UI already uses. No cookies /
+        # credentials are involved, so a wildcard origin is fine here.
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):

@@ -8,7 +8,11 @@
 One LLM path for every OTA. No per-OTA parsers. For session-bound checkout
 URLs that don't survive a server-side re-fetch (secure.booking.com/book.html,
 agoda /book/, mmt hotel-review) pass the live page's own content via
-`page_text=` / `page_html=`, or upload a screenshot / PDF.
+`page_text=` / `page_html=`, upload a screenshot / PDF, or — best — the
+Chrome extension's `page_data=` (real authenticated tab: visible text +
+every request/response the page's own JS made + embedded SPA state, same
+shape `render()` produces, so it goes through the identical RenderResult /
+llm_context / _json_digest path).
 """
 from __future__ import annotations
 
@@ -17,7 +21,8 @@ import re
 
 from yta import extract_llm, llm
 from yta.profiles import route, GENERIC
-from yta.render import render as render_page, clean_text, focus, RenderUnavailable
+from yta.render import (render as render_page, clean_text, focus,
+                        RenderResult, RenderUnavailable)
 from yta.schema import BookingIntent, Source, LLM, URL, now_iso, validate
 from yta.urlfacts import latlng_from_url
 
@@ -66,6 +71,7 @@ def _occ_repr(occ) -> str:
 
 def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
             page_html: str | None = None, media: list | None = None,
+            page_data: dict | None = None,
             timeout_ms: int = 40000, run_validate: bool = True,
             log_sink: list | None = None) -> BookingIntent:
     profile = route(url) if url else GENERIC
@@ -89,7 +95,40 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
 
     # -- assemble page content ---------------------------------------
     context, content_src = None, "url"
-    if page_html:
+    if page_data:
+        text = clean_text(page_data.get("text") or "")
+        html = page_data.get("html") or ""
+        json_ld = page_data.get("json_ld") or []
+        xhr_json = page_data.get("xhr_json") or []
+        rr = RenderResult(url=url, final_url=page_data.get("final_url") or url,
+                          text=text, json_ld=json_ld, xhr_json=xhr_json,
+                          browser_channel="extension")
+        _nreq = sum(1 for x in xhr_json if x.get("kind") == "request")
+        _nemb = sum(1 for x in xhr_json if x.get("kind") == "embedded")
+        pkt.log(f"input: browser extension — {len(text):,} chars of visible text, "
+                f"{len(xhr_json) - _nreq - _nemb} response(s) + {_nreq} request "
+                f"payload(s) + {_nemb} embedded state block(s), "
+                f"{len(json_ld)} JSON-LD block(s)")
+        if html:
+            try:
+                from yta.geoscan import find_latlng
+                rr.coords = find_latlng(html, json_ld, xhr_json)
+            except Exception:
+                rr.coords = None
+        pkt.source.rendered = True
+        if rr.coords and not _is_set(pkt, "hotel.lat"):
+            lat, lng, src = rr.coords
+            pkt.add("hotel.lat", lat, URL, 0.9, f"page ({src})")
+            pkt.add("hotel.lng", lng, URL, 0.9, f"page ({src})")
+            pkt.log(f"found coordinates in the page ({src}): {lat}, {lng}")
+        if rr.has_content():
+            context = rr.llm_context()
+            content_src = "url+extension"
+            pkt.log(f"prepared {len(context):,} chars of page content for parsing")
+        else:
+            pkt.log("extension capture had no readable content "
+                    "— falling back to URL params only")
+    elif page_html:
         context = focus(_text_from_html(page_html), 7000)
         content_src = "url+pasted_html"
         pkt.log(f"input: pasted HTML — {len(page_html):,} chars → "
@@ -139,7 +178,7 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
     elif url:
         pkt.log("browser step skipped — reading the URL parameters only")
 
-    if not url and context is None and not media:
+    if not url and context is None and not media and not page_data:
         pkt.warnings.append("nothing to extract from")
         pkt.log("nothing to extract from — no URL, no page, no upload")
         if run_validate:
@@ -199,7 +238,7 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
 
     missing = pkt.check_mandatory()
     if missing:
-        tail = ("" if (page_html or page_text or media) else
+        tail = ("" if (page_html or page_text or media or page_data) else
                 " — paste the page's text/HTML from your open tab, or upload a "
                 "screenshot / PDF")
         pkt.warnings.insert(0, f"FAIL: missing mandatory field(s): "

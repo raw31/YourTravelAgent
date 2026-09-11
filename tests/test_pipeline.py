@@ -145,3 +145,29 @@ def test_mandatory_ok_when_all_present():
     p.ota_benchmark.final_payable = 18160
     assert p.check_mandatory() == []
     assert p.status == "ok"
+
+
+# -- page_data (Chrome extension capture) --------------------------
+
+def test_page_data_builds_context_and_skips_render(monkeypatch):
+    for v in ("GROQ_API_KEY", "GROK_API_KEY", "OPENAI_API_KEY",
+              "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER"):
+        monkeypatch.delenv(v, raising=False)
+
+    def _boom(*a, **kw):
+        raise AssertionError("render() must not be called when page_data is given")
+    monkeypatch.setattr("yta.pipeline.render_page", _boom)
+
+    page_data = {
+        "text": "Aloha on the Ganges — Deluxe Villa — 2 adults — INR 41,126",
+        "html": "",
+        "json_ld": [],
+        "xhr_json": [{"url": "https://x/api/prebook", "kind": "request",
+                      "body": {"rooms": [{"adults": 2, "children": 0}]}}],
+        "final_url": BOOKING_URL,
+    }
+    p = extract(BOOKING_URL, render=True, page_data=page_data)
+    assert p.source.rendered is True                     # extension counts as "rendered"
+    assert any("browser extension" in l["msg"] for l in p.run_log)
+    assert any("prepared" in l["msg"] and "chars of page content" in l["msg"]
+              for l in p.run_log)                         # context was built, not skipped
