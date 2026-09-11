@@ -44,6 +44,21 @@ function applyMarkup(price, markup) {
   return Math.round(marked * 100) / 100;
 }
 
+// How much cheaper (or more expensive) the SELL price (post-markup) is
+// than what the OTA page itself shows. Only meaningful in the same
+// currency — TripJack always prices in its fixed account currency
+// (TRIPJACK_CURRENCY), which can legitimately differ from the OTA's
+// displayed currency (e.g. a UAE hotel showing AED).
+function savingsInfo(otaPrice, otaCurrency, sellPrice, sellCurrency) {
+  if (otaPrice == null || !isFinite(otaPrice) || sellPrice == null || !isFinite(sellPrice)) return null;
+  const sameCcy = !otaCurrency || !sellCurrency
+    || String(otaCurrency).toUpperCase() === String(sellCurrency).toUpperCase();
+  if (!sameCcy) return { comparable: false };
+  const diff = otaPrice - sellPrice;        // positive = our sell price is cheaper
+  const pct = otaPrice ? (diff / otaPrice) * 100 : 0;
+  return { comparable: true, diff, pct, cheaper: diff >= 0 };
+}
+
 // Markup is set on the admin page (options.html), not here — the popup is
 // too small for real settings UI. Both pages share the same
 // chrome-extension://<id>/ origin, so localStorage is the same store; the
@@ -193,6 +208,19 @@ function render(result, tabId, totalSec) {
       (hasMarkup ? ` <span style="color:#8b949e;font-size:10.5px" title="TripJack's own price before markup">` +
         `(cost ${esc(best.currency)} ${best.total_price})</span>` : "")]);
 
+    const sav = savingsInfo(p.ota_benchmark.final_payable, p.ota_benchmark.currency, sellPrice, best.currency);
+    if (sav && !sav.comparable) {
+      rows.push(["Savings", `<span style="color:#8b949e">can't compare — different currencies `
+        + `(${esc(p.ota_benchmark.currency)} vs ${esc(best.currency)})</span>`]);
+    } else if (sav) {
+      const arrow = sav.cheaper ? "▼" : "▲";
+      const word = sav.cheaper ? "cheaper" : "more";
+      const color = sav.cheaper ? "#4ade80" : "#f87171";
+      rows.push(["Savings", `<span style="color:${color};font-weight:600">${arrow} `
+        + `${esc(best.currency)} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) ${word}</span>`]);
+    }
+    if (lastDeal) lastDeal.savings = sav;
+
     // Always attempt the on-page card once TJ has returned a matched,
     // priced option — do NOT additionally require the OTA's own price to
     // have been extracted. (Bug: this used to be gated on
@@ -311,14 +339,20 @@ $go.addEventListener("click", extractCurrentTab);
 function dealSummaryText(d) {
   const meal = [d.mealBasis, d.refundable === true ? "refundable"
     : d.refundable === false ? "non-refundable" : null].filter(Boolean).join(" · ");
-  const savings = (d.ourPrice != null)
-    ? `\n💰 Best rate: ${d.tjCurrency} ${d.tjPrice}  (page showed: ${d.ourCurrency || ""} ${d.ourPrice})`
-    : `\n💰 Best rate: ${d.tjCurrency} ${d.tjPrice}`;
+  let priceLine = `\n💰 Best rate: ${d.tjCurrency} ${d.tjPrice}`;
+  if (d.ourPrice != null) priceLine += `  (page showed: ${d.ourCurrency || ""} ${d.ourPrice})`;
+  const sav = d.savings;
+  let savingsLine = "";
+  if (sav && sav.comparable) {
+    savingsLine = sav.cheaper
+      ? `\n📉 ${d.tjCurrency} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) cheaper than the OTA`
+      : `\n📈 ${d.tjCurrency} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) more than the OTA`;
+  }
   return `Hi! I'd like to book this via YourTravelAgent 🧳\n\n`
     + `🏨 ${d.hotelName || "—"}\n`
     + `🛏️ ${d.roomName || "—"}${meal ? " · " + meal : ""}\n`
     + `📅 ${d.checkIn || "?"} → ${d.checkOut || "?"}\n`
-    + `👥 ${d.occupancy || "—"}` + savings
+    + `👥 ${d.occupancy || "—"}` + priceLine + savingsLine
     + (d.url ? `\n\nOriginal page: ${d.url}` : "")
     + `\n\nPlease confirm and book this for me.`;
 }

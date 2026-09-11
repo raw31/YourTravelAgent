@@ -66,12 +66,19 @@
   function buildCard({ ourPrice, ourCurrency, tjPrice, tjCurrency, band, tags,
                        roomName, mealBasis, refundable }, floating) {
     const haveOurPrice = ourPrice != null && isFinite(ourPrice);
-    const diff = haveOurPrice ? tjPrice - ourPrice : 0;
-    const pct = haveOurPrice && ourPrice ? (diff / ourPrice) * 100 : 0;
-    const cheaper = diff <= 0;
-    const diffTxt = !haveOurPrice ? ""
-      : cheaper ? `▼ ${Math.abs(pct).toFixed(1)}% cheaper`
-      : `▲ ${pct.toFixed(1)}% more`;
+    // Only compare when both sides are in the same currency — TripJack's
+    // price is always its fixed account settlement currency (see
+    // TRIPJACK_CURRENCY), which can legitimately differ from whatever the
+    // OTA page displays (a UAE hotel showing AED, say). Comparing raw
+    // numbers across currencies would produce a meaningless % figure.
+    const sameCurrency = haveOurPrice && (!ourCurrency || !tjCurrency
+      || String(ourCurrency).toUpperCase() === String(tjCurrency).toUpperCase());
+    const diff = sameCurrency ? ourPrice - tjPrice : 0;   // positive = our price is cheaper
+    const pct = sameCurrency && ourPrice ? (diff / ourPrice) * 100 : 0;
+    const cheaper = diff >= 0;
+    const diffTxt = !sameCurrency ? ""
+      : cheaper ? `▼ ${escapeHtml(tjCurrency || "")} ${Math.abs(diff).toFixed(0)} (${Math.abs(pct).toFixed(1)}%) cheaper`
+      : `▲ ${escapeHtml(tjCurrency || "")} ${Math.abs(diff).toFixed(0)} (${Math.abs(pct).toFixed(1)}%) more`;
     const meta = [roomName, mealBasis,
                  refundable === true ? "refundable" : refundable === false ? "non-refundable" : null]
       .filter(Boolean).map(escapeHtml).join(" · ");
@@ -120,7 +127,8 @@
         <div class="row tj"><span class="k">TripJack</span><span class="v">${escapeHtml(tjCurrency || ourCurrency || "")} ${escapeHtml(tjPrice)}</span></div>
         ${diffTxt ? `<div class="diff ${cheaper ? "down" : "up"}">${escapeHtml(diffTxt)}</div>` : ""}
         ${meta ? `<div class="meta" title="${meta}">${meta}</div>` : ""}
-        ${floating ? `<div class="floatnote">(${haveOurPrice ? "couldn't find this exact price on the page" : "OTA price wasn't extracted from this page"})</div>` : ""}
+        ${floating ? `<div class="floatnote">(${!haveOurPrice ? "OTA price wasn't extracted from this page"
+          : !sameCurrency ? "can't compare — different currencies" : "couldn't find this exact price on the page"})</div>` : ""}
       </div>`;
     shadow.querySelector(".close").addEventListener("click", () => host.remove());
     if (tags && tags.length) host.title = tags.join(", ");
