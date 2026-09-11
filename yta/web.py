@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import traceback
 import uuid
@@ -681,7 +682,8 @@ def _resolve(packet) -> dict:
         if m:
             try:
                 from yta.tripjack.hotel import pricing_request_from_packet
-                d["detail_request"] = pricing_request_from_packet(packet, m.tj_id)
+                d["detail_request"] = pricing_request_from_packet(
+                    packet, m.tj_id, currency=os.environ.get("TRIPJACK_CURRENCY", "INR"))
                 packet.log(f"built TripJack Detail request for tj_id {m.tj_id}")
             except ValueError as e:
                 d["detail_request_error"] = str(e)
@@ -703,7 +705,7 @@ def _resolve(packet) -> dict:
                         s.occupancy or [{"adults": s.adults or 2,
                                          "children": s.children or 0,
                                          "child_ages": s.child_ages or []}],
-                        currency=packet.ota_benchmark.currency or "INR",
+                        currency=client.currency,      # account currency, NOT the OTA's
                         client=client)
                     pms = round((time.perf_counter() - t2) * 1000, 1)
                     d["detail"] = det.to_dict()

@@ -90,6 +90,37 @@ def test_pricing_request_from_packet():
     ]
 
 
+def test_pricing_request_from_packet_ignores_the_otas_currency(monkeypatch):
+    # An OTA can display in any currency (a UAE hotel in AED, a US site in
+    # USD, ...). Sending that straight to TripJack gets rejected with
+    # "[6533] Currency <X> is not supported for this account" the moment it
+    # doesn't match the account's provisioned currency — so the request
+    # must use the account's fixed currency, never packet.ota_benchmark.
+    from yta.schema import BookingIntent, Source
+    monkeypatch.delenv("TRIPJACK_CURRENCY", raising=False)
+    p = BookingIntent(source=Source(ota="agoda", url="x"))
+    p.stay.check_in, p.stay.check_out = "2026-09-02", "2026-09-03"
+    p.stay.set_occupancy([{"adults": 2, "children": 0, "child_ages": []}])
+    p.ota_benchmark.currency = "AED"          # the OTA page showed AED
+    b = pricing_request_from_packet(p, "1")["body"]
+    assert b["currency"] == "INR"             # default account currency, not AED
+
+    monkeypatch.setenv("TRIPJACK_CURRENCY", "SGD")
+    b = pricing_request_from_packet(p, "1")["body"]
+    assert b["currency"] == "SGD"             # honours an explicit account override
+
+    b = pricing_request_from_packet(p, "1", currency="USD")["body"]
+    assert b["currency"] == "USD"             # explicit currency= wins over the env var
+
+
+def test_client_currency_defaults_and_env_override(monkeypatch):
+    monkeypatch.delenv("TRIPJACK_CURRENCY", raising=False)
+    assert TripJackClient.from_env().currency == "INR"
+    monkeypatch.setenv("TRIPJACK_CURRENCY", "AED")
+    assert TripJackClient.from_env().currency == "AED"
+    assert TripJackClient(currency="").currency == "INR"     # never blank
+
+
 def test_pricing_request_from_packet_needs_dates():
     from yta.schema import BookingIntent, Source
     p = BookingIntent(source=Source(ota="agoda", url="x"))

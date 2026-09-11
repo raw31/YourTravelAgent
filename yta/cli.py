@@ -124,7 +124,7 @@ def main(argv=None) -> int:
                         s.occupancy or [{"adults": s.adults or 2,
                                          "children": s.children or 0,
                                          "child_ages": s.child_ages or []}],
-                        currency=packet.ota_benchmark.currency or "INR",
+                        currency=client.currency,      # account currency, NOT the OTA's
                         client=client)
                     print(f"\n# ── TripJack live options ──  {len(det.options)} option(s)",
                           file=sys.stderr)

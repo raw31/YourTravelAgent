@@ -9,6 +9,7 @@ cancellation). No Listing/Review/Book here.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
@@ -165,9 +166,19 @@ def pricing_request(tj_id, check_in: str, check_out: str, occupancy, *,
     }
 
 
-def pricing_request_from_packet(packet, tj_id, *, correlation_id=None) -> dict:
+def pricing_request_from_packet(packet, tj_id, *, currency: str | None = None,
+                                correlation_id=None) -> dict:
     """Build the Pricing request straight from a Phase-1 BookingIntent packet
-    + the Phase-2 resolved tj_id."""
+    + the Phase-2 resolved tj_id.
+
+    `currency` is the TripJack ACCOUNT's currency (fixed — pass
+    `client.currency`, or omit to read the `TRIPJACK_CURRENCY` env var,
+    default "INR"). Deliberately NOT `packet.ota_benchmark.currency` — the
+    OTA page can display in any currency it likes (a UAE hotel in AED, a US
+    site in USD); sending that straight to TripJack gets rejected with
+    "[6533] Currency <X> is not supported for this account" the moment it
+    doesn't match what the account is provisioned for. The OTA's own
+    currency is still tracked/shown separately for the price comparison."""
     s = packet.stay
     if not (s.check_in and s.check_out):
         raise ValueError("packet has no stay dates — Pricing needs checkIn/checkOut")
@@ -175,7 +186,7 @@ def pricing_request_from_packet(packet, tj_id, *, correlation_id=None) -> dict:
                            "child_ages": s.child_ages or []}]
     return pricing_request(
         tj_id, s.check_in, s.check_out, occ,
-        currency=packet.ota_benchmark.currency or "INR",
+        currency=currency or os.environ.get("TRIPJACK_CURRENCY", "INR"),
         correlation_id=correlation_id)
 
 

@@ -57,11 +57,17 @@ class TripJackError(RuntimeError):
 
 class TripJackClient:
     def __init__(self, api_key: str | None = None, *, env: str = "prod",
-                 nationality: str = "106", timeout: float = 25.0,
-                 hosts: dict | None = None):
+                 nationality: str = "106", currency: str = "INR",
+                 timeout: float = 25.0, hosts: dict | None = None):
         self.api_key = api_key or os.environ.get("TRIPJACK_API_KEY", "")
         self.env = env or "prod"
         self.nationality = nationality or "106"
+        # the currency TripJack settles/prices in for this account — fixed,
+        # NOT whatever currency the OTA page happened to display the price
+        # in (a UAE hotel showing AED, a US site showing USD, etc.). Passing
+        # the OTA's currency straight through caused
+        # "[6533] Currency AED is not supported for this account".
+        self.currency = currency or "INR"
         self.timeout = timeout
         self.hosts = hosts or _HOSTS.get(self.env) or _HOSTS["prod"]
 
@@ -71,6 +77,7 @@ class TripJackClient:
             api_key=os.environ.get("TRIPJACK_API_KEY", ""),
             env=os.environ.get("TRIPJACK_ENV", "prod"),
             nationality=os.environ.get("TRIPJACK_NATIONALITY", "106"),
+            currency=os.environ.get("TRIPJACK_CURRENCY", "INR"),
         )
 
     def configured(self) -> bool:
