@@ -4,11 +4,7 @@
 // pipeline. `page_data` just takes priority over Playwright render there.
 const BASE = "http://127.0.0.1:8765";
 
-// TODO: set this to your own WhatsApp number (country code + number, no
-// spaces/+/dashes — e.g. "919876543210") or a full https://wa.me/... link.
-// Left blank ships safely: the book-with-me button still works, it just
-// opens plain wa.me with no pre-selected contact until this is set.
-const WHATSAPP_NUMBER = "";
+const WHATSAPP_NUMBER = "+919556513073";
 
 const $status = document.getElementById("status");
 const $out = document.getElementById("out");
@@ -18,8 +14,44 @@ const $bookBtn = document.getElementById("bookBtn");
 const $bookPanel = document.getElementById("bookPanel");
 const $bookSummary = document.getElementById("bookSummary");
 const $waLink = document.getElementById("waLink");
+const $adminLink = document.getElementById("adminLink");
 
 let lastDeal = null;   // populated by render() whenever TripJack matches a rate
+
+// Markup — a generic percentage-and/or-flat addition on top of TripJack's
+// own price, applied wherever a price is quoted OUTWARD (the on-page card,
+// the WhatsApp summary). TripJack's raw cost is never altered — this only
+// changes what gets shown/quoted. Persisted per-browser via localStorage
+// (this popup's own chrome-extension:// origin), so it survives reopening
+// the popup without needing a server round-trip. The flat component is in
+// whatever currency TripJack actually priced in (TRIPJACK_CURRENCY, INR by
+// default) — it does not get currency-converted.
+function loadMarkup() {
+  try {
+    return {
+      pct: parseFloat(localStorage.getItem("yta_markup_pct")) || 0,
+      flat: parseFloat(localStorage.getItem("yta_markup_flat")) || 0,
+    };
+  } catch (e) {
+    return { pct: 0, flat: 0 };
+  }
+}
+
+function applyMarkup(price, markup) {
+  if (price == null || !isFinite(price)) return price;
+  const m = markup || loadMarkup();
+  const marked = price * (1 + (m.pct || 0) / 100) + (m.flat || 0);
+  return Math.round(marked * 100) / 100;
+}
+
+// Markup is set on the admin page (options.html), not here — the popup is
+// too small for real settings UI. Both pages share the same
+// chrome-extension://<id>/ origin, so localStorage is the same store; the
+// popup just reads it fresh on every extraction/render.
+$adminLink.addEventListener("click", (e) => {
+  e.preventDefault();
+  chrome.runtime.openOptionsPage();
+});
 
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => (
@@ -130,11 +162,14 @@ function render(result, tabId, totalSec) {
   }
 
   const best = rz.room_map && rz.room_map.matched ? pickBestOption(rz.room_map) : null;
+  const markup = loadMarkup();
+  const sellPrice = best ? applyMarkup(best.total_price, markup) : null;
+  const hasMarkup = !!(markup.pct || markup.flat);
   lastDeal = best ? {
     hotelName: p.hotel.name, checkIn: p.stay.check_in, checkOut: p.stay.check_out,
     occupancy: occRepr(p.stay.occupancy), roomName: best.room_name,
     mealBasis: best.meal_basis, refundable: best.refundable,
-    tjPrice: best.total_price, tjCurrency: best.currency,
+    tjPrice: sellPrice, tjCurrency: best.currency,
     ourPrice: p.ota_benchmark.final_payable, ourCurrency: p.ota_benchmark.currency,
     url: p.source && p.source.url,
   } : null;
@@ -154,7 +189,9 @@ function render(result, tabId, totalSec) {
     const band = esc(rz.room_map.band);
     rows.push(["YourTravelAgent",
       `<span class="band band-${band === "strong" ? "high" : "medium"}">${band}</span> ` +
-      `${esc(best.currency)} ${best.total_price}`]);
+      `${esc(best.currency)} ${sellPrice}` +
+      (hasMarkup ? ` <span style="color:#8b949e;font-size:10.5px" title="TripJack's own price before markup">` +
+        `(cost ${esc(best.currency)} ${best.total_price})</span>` : "")]);
 
     // Always attempt the on-page card once TJ has returned a matched,
     // priced option — do NOT additionally require the OTA's own price to
@@ -169,7 +206,7 @@ function render(result, tabId, totalSec) {
       type: "yta:showPrice",
       ourPrice: p.ota_benchmark.final_payable ?? null,
       ourCurrency: p.ota_benchmark.currency,
-      tjPrice: best.total_price,
+      tjPrice: sellPrice,
       tjCurrency: best.currency,
       band: rz.room_map.band,
       tags: best.tags,
