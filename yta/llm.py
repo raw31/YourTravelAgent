@@ -215,7 +215,16 @@ def _gemini(system, parts, model, key, max_tokens, retries=1):
     from google.genai.errors import ServerError
 
     client = genai.Client(api_key=key,
-                          http_options=types.HttpOptions(timeout=45_000))  # ms
+                          http_options=types.HttpOptions(
+                              timeout=45_000,             # ms
+                              # The SDK's own default retry policy retries a
+                              # 429 (rate limit / daily quota exhausted) up
+                              # to 5x with exponential backoff — 1+2+4+8+16s
+                              # ~= 30s of pure waiting on a call that cannot
+                              # possibly succeed until the quota resets.
+                              # attempts=1 disables that; our own loop below
+                              # still retries ServerError (5xx) deliberately.
+                              retry_options=types.HttpRetryOptions(attempts=1)))
     contents = []
     for part in parts:
         if isinstance(part, tuple):
