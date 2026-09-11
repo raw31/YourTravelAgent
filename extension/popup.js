@@ -19,6 +19,21 @@ function occRepr(occ) {
   return occ.map((r) => `${r.adults ?? "?"}A${r.children ? "+" + r.children + "C" : ""}`).join(", ");
 }
 
+// The most relevant TripJack option for the matched room: prefer one that
+// satisfies the requested rate plan (ratekey_option_ids), cheapest of those;
+// otherwise just the cheapest option of the matched room. Mirrors
+// RoomMapResult.best_option() server-side — same rule, so the number shown
+// in the page badge always matches what "Prebook" in the full panel would
+// pick first.
+function pickBestOption(roomMap) {
+  const opts = (roomMap && roomMap.rate_options) || [];
+  if (!opts.length) return null;
+  const keyed = new Set(roomMap.ratekey_option_ids || []);
+  const pool = opts.filter((o) => keyed.has(o.option_id));
+  const use = pool.length ? pool : opts;
+  return use.reduce((a, b) => (b.total_price < a.total_price ? b : a));
+}
+
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
@@ -40,7 +55,7 @@ function collectFromTab(tabId) {
   });
 }
 
-function poll(jobId) {
+function poll(jobId, tabId) {
   const t = setInterval(async () => {
     let s;
     try {
@@ -58,11 +73,11 @@ function poll(jobId) {
       $status.textContent = "Failed: " + s.error;
       return;
     }
-    render(s.result);
+    render(s.result, tabId);
   }, 500);
 }
 
-function render(result) {
+function render(result, tabId) {
   const p = result.packet;
   const rz = result.resolution || {};
   const ok = p.status === "ok";
@@ -83,6 +98,36 @@ function render(result) {
       `<span class="band band-${band}">${band}</span> ${esc(rz.match.tj_id)} · ${esc(rz.match.hotel_name)}`]);
   } else if (rz.available === false) {
     rows.push(["TripJack", esc(rz.note || "not resolved")]);
+  }
+
+  const best = rz.room_map && rz.room_map.matched ? pickBestOption(rz.room_map) : null;
+  let badgeNote = "";
+  if (best) {
+    const band = esc(rz.room_map.band);
+    rows.push(["YourTravelAgent",
+      `<span class="band band-${band === "strong" ? "high" : "medium"}">${band}</span> ` +
+      `${esc(best.currency)} ${best.total_price}`]);
+
+    if (p.ota_benchmark.final_payable) {
+      chrome.tabs.sendMessage(tabId, {
+        type: "yta:showPrice",
+        ourPrice: p.ota_benchmark.final_payable,
+        ourCurrency: p.ota_benchmark.currency,
+        tjPrice: best.total_price,
+        tjCurrency: best.currency,
+        band: rz.room_map.band,
+        tags: best.tags,
+      }, (resp) => {
+        if (chrome.runtime.lastError) return;      // tab navigated away — ignore
+        if (!resp || !resp.placed) {
+          const note = document.createElement("div");
+          note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
+          note.textContent = "(could not place the price badge on the page — "
+            + "the OTA price text wasn't matched)";
+          $out.appendChild(note);
+        }
+      });
+    }
   }
 
   $out.innerHTML = rows.map(([k, v]) =>
@@ -142,7 +187,7 @@ async function extractCurrentTab() {
   }
 
   $status.textContent = "Extracting…";
-  poll(jobId);
+  poll(jobId, tab.id);
 }
 
 $go.addEventListener("click", extractCurrentTab);
