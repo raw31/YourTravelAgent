@@ -101,7 +101,16 @@ function render(result, tabId) {
   }
 
   const best = rz.room_map && rz.room_map.matched ? pickBestOption(rz.room_map) : null;
-  let badgeNote = "";
+  if (!best && rz.available && rz.match) {
+    // hotel matched in TripJack but no price came through — say why instead
+    // of silently showing nothing (pricing outage, IP-allowlist rejection,
+    // no inventory for these dates, or no confident room match).
+    let why = "no price available";
+    if (rz.detail_error) why = "pricing call failed: " + rz.detail_error;
+    else if (rz.detail && !((rz.detail.options || []).length)) why = "TripJack has no inventory for this hotel/stay";
+    else if (rz.room_map && !rz.room_map.matched) why = `no confident room match (best score ${rz.room_map.score ?? "?"})`;
+    rows.push(["YourTravelAgent", `<span style="color:#8b949e">${esc(why)}</span>`]);
+  }
   if (best) {
     const band = esc(rz.room_map.band);
     rows.push(["YourTravelAgent",
