@@ -40,3 +40,52 @@ def test_model_env_override(monkeypatch):
     provider, _, model = llm.resolve()
     assert provider == "grok"
     assert model == "grok-9-turbo"
+
+
+# -- Groq json_object 400 -> GenerationFailed (fall back, don't crash) ----
+
+def test_openai_compat_bad_request_becomes_generation_failed(monkeypatch):
+    import httpx
+    from openai import BadRequestError
+
+    class _FakeCompletions:
+        def create(self, **kw):
+            resp = httpx.Response(
+                400, request=httpx.Request("POST", "https://api.groq.com/x"),
+                json={"error": {"message": "Failed to validate JSON. Please "
+                                "adjust your prompt.", "code": "json_validate_failed"}})
+            raise BadRequestError("Failed to validate JSON.", response=resp,
+                                  body={"error": {"code": "json_validate_failed"}})
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr("openai.OpenAI", lambda **kw: _FakeClient())
+    with pytest.raises(llm.GenerationFailed):
+        llm._openai_compat("groq", "sys", "user", "openai/gpt-oss-120b",
+                           "gsk_test", 1800, retries=0)
+
+
+def test_openai_compat_413_still_becomes_size_limit(monkeypatch):
+    import httpx
+    from openai import BadRequestError
+
+    class _FakeCompletions:
+        def create(self, **kw):
+            resp = httpx.Response(
+                413, request=httpx.Request("POST", "https://api.groq.com/x"))
+            raise BadRequestError("Request too large", response=resp, body=None)
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr("openai.OpenAI", lambda **kw: _FakeClient())
+    with pytest.raises(llm.SizeLimitError):
+        llm._openai_compat("groq", "sys", "user", "openai/gpt-oss-120b",
+                           "gsk_test", 1800, retries=0)

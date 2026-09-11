@@ -3,6 +3,7 @@ import datetime as dt
 
 import pytest
 
+from yta import llm
 from yta.pipeline import extract, _norm_occ, _apply
 from yta.profiles import route
 from yta.schema import BookingIntent, Source, Stay, RoomOccupancy, validate
@@ -171,3 +172,84 @@ def test_page_data_builds_context_and_skips_render(monkeypatch):
     assert any("browser extension" in l["msg"] for l in p.run_log)
     assert any("prepared" in l["msg"] and "chars of page content" in l["msg"]
               for l in p.run_log)                         # context was built, not skipped
+
+
+def test_structured_data_skips_the_llm_entirely(monkeypatch):
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("LLM must not be called — everything was resolvable")))
+    page_data = {
+        "text": "",
+        "html": "",
+        "json_ld": [],
+        "xhr_json": [{"url": "https://secure.booking.com/api/prebook", "kind": "request", "body": {
+            "checkIn": "2026-09-21", "checkOut": "2026-09-22",
+            "currency": "INR", "totalPrice": 15390,
+            "hotelName": "Aloha on the Ganges",
+            "roomName": "Deluxe Room", "view": "River View", "bedType": "King",
+        }}],
+        "final_url": BOOKING_URL,
+    }
+    p = extract(BOOKING_URL, render=True, page_data=page_data)
+    assert p.status == "ok", p.missing_mandatory
+    assert p.hotel.name == "Aloha on the Ganges"
+    assert p.stay.check_in == "2026-09-21" and p.stay.check_out == "2026-09-22"
+    assert p.ota_benchmark.currency == "INR" and p.ota_benchmark.final_payable == 15390
+    assert p.requested_offer.room_name == "Deluxe Room"
+    assert any("skipping the LLM call" in l["msg"] for l in p.run_log)
+
+
+def test_llm_cannot_overwrite_a_protected_structured_field(monkeypatch):
+    # even if an LLM pass DID run (e.g. one field still missing), it must not
+    # clobber a value the structured resolver already set with high confidence
+    calls = []
+
+    class _FakeRes:
+        fields = {"hotel.name": "WRONG NAME FROM LLM",
+                  "requested_offer.description": "a lovely room"}
+        confidence = {}
+        provider, model = "fake", "fake"
+        contradictions = []
+
+    def _fake_extract(*a, **kw):
+        calls.append(1)
+        return _FakeRes()
+
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract", _fake_extract)
+    page_data = {
+        "text": "", "html": "", "json_ld": [],
+        "xhr_json": [{"url": "x", "kind": "request", "body": {
+            "hotelName": "Aloha on the Ganges",
+        }}],
+        "final_url": BOOKING_URL,
+    }
+    p = extract(BOOKING_URL, render=True, page_data=page_data)
+    assert len(calls) >= 1                       # LLM did run (room_name/dates still missing)
+    assert p.hotel.name == "Aloha on the Ganges"  # but did NOT overwrite the protected field
+
+
+def test_generation_failed_falls_back_to_next_provider(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza_test")
+
+    class _GoodRes:
+        provider, model = "gemini", "gemini-flash-latest"
+        fields = {"hotel.name": "Aloha on the Ganges",
+                  "requested_offer.room_name": "Deluxe Room",
+                  "requested_offer.description": "Garden view"}
+        confidence = {}
+        contradictions = []
+
+    calls = []
+
+    def _fake_extract(context, url="", media=None, provider=None):
+        calls.append(provider)
+        if provider == "groq":
+            raise llm.GenerationFailed("Failed to validate JSON.")
+        return _GoodRes()
+
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract", _fake_extract)
+    p = extract(BOOKING_URL, render=False)
+    assert calls == ["groq", "gemini"]                    # fell through, didn't crash
+    assert p.hotel.name == "Aloha on the Ganges"
+    assert any("bad generation" in w for w in p.warnings)

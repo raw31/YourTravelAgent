@@ -23,7 +23,8 @@ from yta import extract_llm, llm
 from yta.profiles import route, GENERIC
 from yta.render import (render as render_page, clean_text, focus,
                         RenderResult, RenderUnavailable)
-from yta.schema import BookingIntent, Source, LLM, URL, now_iso, validate
+from yta.schema import BookingIntent, Source, LLM, NETWORK, URL, now_iso, validate
+from yta.structured import extract_structured
 from yta.urlfacts import latlng_from_url
 
 
@@ -69,6 +70,25 @@ def _occ_repr(occ) -> str:
     return f"{len(occ)}R: " + " ".join(parts)
 
 
+def _apply_structured(pkt, rr) -> set:
+    """Resolve the well-shaped fields (dates, currency, price, hotel/room
+    name) straight out of captured JSON — before the LLM ever runs. Returns
+    the set of paths it filled, so the LLM pass(es) that may follow don't
+    clobber a higher-confidence deterministic value with a guess.
+    """
+    fields = extract_structured(rr.xhr_json, rr.json_ld)
+    protect = set()
+    for path, sf in fields.items():
+        if _is_set(pkt, path):
+            continue
+        pkt.add(path, sf.value, NETWORK, sf.confidence, f"captured JSON: {sf.pointer}")
+        protect.add(path)
+    if protect:
+        pkt.log(f"resolved from captured JSON (no LLM needed for these): "
+                + ", ".join(sorted(protect)))
+    return protect
+
+
 def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
             page_html: str | None = None, media: list | None = None,
             page_data: dict | None = None,
@@ -95,6 +115,7 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
 
     # -- assemble page content ---------------------------------------
     context, content_src = None, "url"
+    protect: set = set()      # paths resolved deterministically — LLM may not overwrite
     if page_data:
         text = clean_text(page_data.get("text") or "")
         html = page_data.get("html") or ""
@@ -121,6 +142,7 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
             pkt.add("hotel.lat", lat, URL, 0.9, f"page ({src})")
             pkt.add("hotel.lng", lng, URL, 0.9, f"page ({src})")
             pkt.log(f"found coordinates in the page ({src}): {lat}, {lng}")
+        protect |= _apply_structured(pkt, rr)
         if rr.has_content():
             context = rr.llm_context()
             content_src = "url+extension"
@@ -162,6 +184,8 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
                 lat, lng, src = rr.coords
                 pkt.add("hotel.lat", lat, URL, 0.9, f"page ({src})")
                 pkt.add("hotel.lng", lng, URL, 0.9, f"page ({src})")
+            if not rr.blocked():
+                protect |= _apply_structured(pkt, rr)
             if rr.has_content() and not rr.blocked():
                 context = rr.llm_context()
                 content_src = f"url+render[{rr.browser_channel}]"
@@ -185,14 +209,26 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
             validate(pkt)
         return pkt
 
+    # early occupancy pass — URL/page-JSON signals only, no LLM has run yet.
+    # Together with _apply_structured() above, this decides whether the LLM
+    # call is needed at all: real payoff for the browser extension, whose
+    # xhr_json is genuine structured API traffic, not scraped prose.
+    protect |= _resolve_occupancy(pkt, url)
+    pkt.derive_stay()
+
     # -- LLM extraction: primary provider, then fall back / fill gaps --
-    try:
-        chain = llm.provider_chain(media=bool(media))
-        pkt.log(f"parsing the booking with the LLM ({' → '.join(chain)})")
-    except llm.LLMUnavailable as e:
-        pkt.warnings.append(str(e))
-        pkt.log(f"no LLM available: {e}")
+    if context is not None and not pkt.check_mandatory():
+        pkt.log("all mandatory fields resolved from captured data "
+                "— skipping the LLM call")
         chain = []
+    else:
+        try:
+            chain = llm.provider_chain(media=bool(media))
+            pkt.log(f"parsing the booking with the LLM ({' → '.join(chain)})")
+        except llm.LLMUnavailable as e:
+            pkt.warnings.append(str(e))
+            pkt.log(f"no LLM available: {e}")
+            chain = []
 
     used = []
     for prov in chain:
@@ -205,12 +241,16 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
             pkt.log(f"{prov} rejected the request (too large for its free tier) "
                     f"— switching provider")
             continue
+        except llm.GenerationFailed as e:
+            pkt.warnings.append(f"{prov}: bad generation ({e}) — trying next provider")
+            pkt.log(f"{prov} returned an invalid generation — switching provider")
+            continue
         except (llm.LLMUnavailable, json.JSONDecodeError) as e:
             pkt.warnings.append(f"{prov}: {type(e).__name__} — trying next provider")
             pkt.log(f"{prov} failed ({type(e).__name__}) — switching provider")
             continue
 
-        _apply(pkt, res, fill_only=bool(used))
+        _apply(pkt, res, fill_only=bool(used), protect=protect)
         used.append(f"{res.provider}:{res.model}")
         pkt.derive_stay()
         pkt.log(f"{res.provider} returned: {_found_summary(pkt)}"
@@ -249,10 +289,15 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
     return pkt
 
 
-def _resolve_occupancy(pkt, url: str) -> None:
+def _resolve_occupancy(pkt, url: str) -> set:
     """Consolidate every occupancy signal — URL params/tokens, captured API
     request payloads (via the LLM), and the LLM's own page read — into one
-    per-room list, even-splitting an aggregate when that's all there is."""
+    per-room list, even-splitting an aggregate when that's all there is.
+    Called twice: once before the LLM runs (URL/page-JSON signals only —
+    lets the mandatory-fields check decide whether the LLM is even needed)
+    and once after (now also folding in whatever the LLM itself read).
+    Returns {"stay.occupancy"} when it set a value, so a later LLM pass
+    knows not to overwrite a deterministic result with a guess."""
     from yta import occupancy
     s = pkt.stay
     sigs = occupancy.signals_from_url(url)
@@ -269,7 +314,7 @@ def _resolve_occupancy(pkt, url: str) -> None:
     if not occ:
         if sigs or llm_occ:
             pkt.log(f"occupancy: unresolved ({src})")
-        return
+        return set()
 
     before = _occ_repr(s.occupancy) if s.occupancy else "none"
     s.set_occupancy(occ)
@@ -281,6 +326,7 @@ def _resolve_occupancy(pkt, url: str) -> None:
     s.occupancy_source = src
     pkt.log(f"occupancy → {now}  [{src}, conf {conf:.2f}]"
             + (f"  (was {before})" if before not in ("none", now) else ""))
+    return {"stay.occupancy"} if conf >= 0.7 else set()
 
 
 def _is_set(pkt, path: str) -> bool:
@@ -297,11 +343,11 @@ def _is_set(pkt, path: str) -> bool:
 _URL_WINS = ("hotel.lat", "hotel.lng")
 
 
-def _apply(pkt: BookingIntent, res, fill_only: bool = False) -> None:
+def _apply(pkt: BookingIntent, res, fill_only: bool = False, protect: set = frozenset()) -> None:
     for path, val in res.fields.items():
         conf = res.confidence.get(path, 0.6)
         if path == "stay.occupancy":
-            if fill_only and pkt.stay.occupancy:
+            if (fill_only or "stay.occupancy" in protect) and pkt.stay.occupancy:
                 continue
             rooms = _norm_occ(val)
             if rooms:
@@ -309,7 +355,7 @@ def _apply(pkt: BookingIntent, res, fill_only: bool = False) -> None:
                 pkt.note("stay.occupancy", _occ_repr(pkt.stay.occupancy),
                          LLM, conf, f"url+page ({res.provider})")
         else:
-            if (fill_only or path in _URL_WINS) and _is_set(pkt, path):
+            if (fill_only or path in _URL_WINS or path in protect) and _is_set(pkt, path):
                 continue
             pkt.add(path, val, LLM, conf, f"url+page ({res.provider})")
 

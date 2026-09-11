@@ -61,6 +61,14 @@ class SizeLimitError(RuntimeError):
     """Provider rejected the request as too large (e.g. Groq free-tier TPM)."""
 
 
+class GenerationFailed(RuntimeError):
+    """The model call itself came back a hard 400 that isn't a size problem —
+    e.g. Groq's json_object mode occasionally returns
+    `json_validate_failed` with an empty `failed_generation`. Not this
+    provider's fault to retry into; the pipeline should just try the next
+    provider in the chain, same as SizeLimitError."""
+
+
 # -- provider resolution ------------------------------------------
 
 def _key(provider: str) -> str:
@@ -149,7 +157,7 @@ def complete(system: str, user: str, max_tokens: int = 1500, *,
 
 
 def _openai_compat(provider, system, user, model, key, max_tokens, retries):
-    from openai import OpenAI, RateLimitError, APIStatusError
+    from openai import OpenAI, RateLimitError, BadRequestError, APIStatusError
     client = OpenAI(api_key=key, base_url=_OPENAI_COMPAT_BASE.get(provider))
     kwargs = {"response_format": {"type": "json_object"}} \
         if provider in ("groq", "openai") else {}
@@ -169,6 +177,14 @@ def _openai_compat(provider, system, user, model, key, max_tokens, retries):
             if attempt == retries:
                 raise
             time.sleep(20 * (attempt + 1))
+        except BadRequestError as e:                    # subclass of APIStatusError
+            msg = str(e).lower()
+            if getattr(e, "status_code", None) == 413 or "too large" in msg:
+                raise SizeLimitError(str(e)) from e
+            # e.g. groq json_object mode: "Failed to validate JSON. Please
+            # adjust your prompt." with an empty failed_generation — a bad
+            # generation, not a bad key/request shape. Try the next provider.
+            raise GenerationFailed(str(e)) from e
         except APIStatusError as e:
             if getattr(e, "status_code", None) == 413 or "too large" in str(e).lower():
                 raise SizeLimitError(str(e)) from e
