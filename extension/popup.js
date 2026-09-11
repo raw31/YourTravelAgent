@@ -126,12 +126,15 @@ function render(result, tabId) {
         tjCurrency: best.currency,
         band: rz.room_map.band,
         tags: best.tags,
+        roomName: best.room_name,
+        mealBasis: best.meal_basis,
+        refundable: best.refundable,
       }, (resp) => {
         if (chrome.runtime.lastError) return;      // tab navigated away — ignore
         if (!resp || !resp.placed) {
           const note = document.createElement("div");
           note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
-          note.textContent = "(could not place the price badge on the page — "
+          note.textContent = "(could not place the price card on the page — "
             + "the OTA price text wasn't matched)";
           $out.appendChild(note);
         }

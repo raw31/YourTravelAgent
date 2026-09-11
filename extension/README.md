@@ -42,21 +42,37 @@ resolved, the TripJack match and the best matching rate. **Open full debug
 panel →** takes you to `localhost:8765` for the live pricing table,
 room→rate-plan mapping, and the Prebook (Review) button.
 
-## The on-page price badge
+## The on-page price-comparison card
 
-When a room resolves, a small **"YourTravelAgent: ₹X (▼N% cheaper)"** badge
-is dropped right next to the OTA's own displayed price, on the page itself.
+When a room resolves, a small card is dropped right next to the OTA's own
+displayed price, on the page itself:
+
+```
+┌ YourTravelAgent  [STRONG] ✕ ┐
+│ This page      INR 41,126   │
+│ TripJack       INR 40,689   │
+│ ▼ 1.1% cheaper              │
+│ Deluxe Villa · Breakfast ·  │
+│ refundable                  │
+└──────────────────────────────┘
+```
 
 **How it finds "the OTA's price" — generically, never by selector:** the
-badge placer is never told which CSS class or element holds the price for
+card placer is never told which CSS class or element holds the price for
 any given site. It is handed the *number* our own pipeline already
 extracted from that same page (`ota_benchmark.final_payable`) and walks the
 page's text nodes looking for that number, the same way a person would
 recognise it by eye — not by knowing anything about the site. If the exact
 figure isn't found verbatim on the page (rare — formatting differences,
 canvas-rendered price, etc.), the popup still shows the numbers, it just
-can't place the on-page badge. Nothing here is keyed to Booking.com,
+can't place the on-page card. Nothing here is keyed to Booking.com,
 Agoda, MakeMyTrip, or any other OTA by name.
+
+The card itself is rendered inside a **Shadow DOM** (`attachShadow`) with
+its own `<style>` — the same reason the locator is selector-free: every
+OTA's page CSS is different, so the card must be fully isolated from it
+(never inherits the host page's fonts/colors, never leaks its own styles
+onto the page). Click the ✕ to dismiss it; re-extracting replaces it.
 
 ## Files
 
