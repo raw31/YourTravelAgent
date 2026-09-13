@@ -85,6 +85,21 @@ def _run_job(job_id: str, req: dict) -> None:
 # extract()+_resolve() pipeline as everywhere else — this only adds a
 # webhook front door and a text-formatted reply.
 
+def _wa_send(frm: str, text: str) -> dict:
+    """Every outbound WhatsApp send goes through here — logs the actual
+    result. A bare whatsapp.send_text() call can fail silently (expired
+    token, rate limit, bad recipient) and the code carries on as if the
+    customer got the message when they got nothing at all — this is the
+    one and only place that matters, so fix it once here rather than
+    re-checking the result at every call site."""
+    from yta import whatsapp
+    result = whatsapp.send_text(frm, text)
+    if result.get("_status_code") != 200:
+        print(f"[wa] SEND FAILED to {frm}: status={result.get('_status_code')} "
+              f"error={result.get('error')}", flush=True)
+    return result
+
+
 # In-memory: phone number -> {"packet": BookingIntent, "missing": [paths]}.
 # A customer is "mid-conversation" whenever they're in here — their NEXT
 # message is treated as an answer to the missing-fields question, not as a
@@ -141,7 +156,6 @@ def _extracted_lines(packet) -> list:
 
 
 def _ask_for_missing(frm: str, missing: list, clarify: str | None = None) -> None:
-    from yta import whatsapp
     from yta.extract_llm import FIELD_LABELS
     labels = [FIELD_LABELS[p] for p in missing if p in FIELD_LABELS]
     if not labels:
@@ -158,7 +172,7 @@ def _ask_for_missing(frm: str, missing: list, clarify: str | None = None) -> Non
     else:
         text = ("Missing:\n" + "\n".join(labels)
                 + "\n\nReply with these — any format works, or send a new link/photo to start over.")
-    whatsapp.send_text(frm, text)
+    _wa_send(frm, text)
 
 
 def _whatsapp_reply(packet, resolution: dict | None) -> str:
@@ -267,15 +281,14 @@ def _whatsapp_reply(packet, resolution: dict | None) -> str:
 
 
 def _finish_and_reply(frm: str, packet) -> None:
-    from yta import whatsapp
     # The TripJack resolve+pricing call below is the one genuinely slow
     # step left with nothing sent back in between — ack it so the wait
     # doesn't read as the bot having gone silent.
-    whatsapp.send_text(frm, "Fetching the discounted rates for you.")
+    _wa_send(frm, "Fetching the discounted rates for you.")
     resolution = _resolve(packet) if packet.hotel.name else None
     reply = _whatsapp_reply(packet, resolution)
-    result = whatsapp.send_text(frm, reply)
-    print(f"[wa] reply sent: status={result.get('_status_code')} error={result.get('error')}", flush=True)
+    _wa_send(frm, reply)
+    print(f"[wa] batch for {frm} complete", flush=True)
 
 
 # Sending several photos "together" in WhatsApp does NOT arrive as one
@@ -378,17 +391,17 @@ def _process_batch(frm: str) -> None:
 
         if not url and not media:
             print("[wa] no link or media found — sending the how-to-use reply", flush=True)
-            whatsapp.send_text(frm, "Send me a hotel booking link or a screenshot "
+            _wa_send(frm, "Send me a hotel booking link or a screenshot "
                                      "of one and I'll check the best price for it.")
             return
 
-        whatsapp.send_text(frm, "Checking your deal")   # ack before the (vision) extraction runs
+        _wa_send(frm, "Checking your deal")   # ack before the (vision) extraction runs
 
         print(f"[wa] extracting: url={url!r} media_count={len(media_items)}", flush=True)
         packet = extract(url or "", render=bool(url), media=media, log_sink=[])
         print(f"[wa] extraction done: hotel={packet.hotel.name!r} status={packet.status}", flush=True)
 
-        whatsapp.send_text(frm, "\n".join(["Your deal:", "----"] + _extracted_lines(packet)))
+        _wa_send(frm, "\n".join(["Your deal:", "----"] + _extracted_lines(packet)))
 
         missing = packet.missing_mandatory or packet.check_mandatory()
         if missing:
@@ -402,7 +415,7 @@ def _process_batch(frm: str) -> None:
         print(f"[wa] ERROR handling batch: {type(e).__name__}: {e}", flush=True)
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS.pop(frm, None)
-        whatsapp.send_text(frm, f"Sorry, something went wrong: {type(e).__name__}: {e}")
+        _wa_send(frm, f"Sorry, something went wrong: {type(e).__name__}: {e}")
 
 
 PAGE = """<!doctype html>
