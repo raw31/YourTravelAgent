@@ -169,6 +169,103 @@ def _dig(d: dict, path: str):
     return cur
 
 
+# Human-friendly prompts for the mandatory fields — used only by
+# extract_clarification() below, when a customer (WhatsApp flow) needs to
+# be asked for whatever the link/screenshot itself didn't contain.
+FIELD_QUESTIONS = {
+    "hotel.name": "the hotel's name",
+    "stay.check_in": "the check-in date",
+    "stay.check_out": "the check-out date",
+    "stay.rooms": "the number of rooms",
+    "stay.occupancy": "adults/children (and ages) per room",
+    "requested_offer.room_name": "the room type you booked",
+    "requested_offer.room_detail": "any room detail — bed type, view, or a short description",
+    "ota_benchmark.final_payable": "the total price shown on the page",
+}
+
+# Short, labeled form the WhatsApp flow shows the customer when asking for
+# whatever's missing — ALWAYS rendered one per line (never comma-joined
+# into a sentence: that reads fine for 1-2 fields and turns into an
+# unreadable run-on the moment 4-5 are missing at once). Emoji + Title
+# Case rather than ALL CAPS, which reads as shouting once several are
+# stacked; occupancy keeps its example since it's the one field people
+# naturally phrase inconsistently.
+FIELD_LABELS = {
+    "hotel.name": "🏨 Hotel Name",
+    "stay.check_in": "📅 Check-in Date",
+    "stay.check_out": "📅 Check-out Date",
+    "stay.rooms": "🚪 Number of Rooms",
+    "stay.occupancy": '👥 Occupancy (e.g. "1 Room 2 Adults, 1 Room 1 Adult 1 Child")',
+    "requested_offer.room_name": "🛏️ Room Name",
+    "requested_offer.room_detail": "🛏️ Room Detail (bed type / view / description)",
+    "ota_benchmark.final_payable": "💳 Total Price Shown on the Page",
+}
+
+
+def extract_clarification(missing_paths: list, reply_text: str,
+                           provider: str | None = None) -> tuple:
+    """A small, targeted follow-up call — NOT the full page extraction.
+    Given exactly the mandatory fields still missing and a customer's
+    plain-language reply so far (no page content involved — see the
+    caller for why this should be the FULL accumulated conversation, not
+    just the latest message), fill in whichever fields the reply actually
+    answers. Used by the WhatsApp flow when a link/screenshot didn't have
+    everything mandatory.
+
+    Returns (fields: dict, clarify: str | None). `fields` never guesses —
+    a field stays absent rather than invented. `clarify` is a short,
+    SPECIFIC follow-up question the model raises only when a reply was
+    partial/ambiguous for one of these fields (a date with no year, an
+    occupancy with no children count, etc.) — lets the caller ask exactly
+    what's missing instead of repeating the whole field list verbatim,
+    which reads as the bot having ignored what was already said."""
+    wanted = [p for p in missing_paths if p in FIELD_QUESTIONS]
+    if not wanted or not (reply_text or "").strip():
+        return {}, None
+    system = (
+        "A hotel-booking assistant is missing a few details and asked the "
+        "customer for them in plain language. Extract ONLY the fields "
+        "listed below from their reply. Use null for anything not actually "
+        "answered — never guess or invent a value (e.g. a date with no "
+        "year given stays null, don't assume a year). Reply with JSON "
+        "only.\n\n"
+        "Fields:\n" + "\n".join(f"  {p} — {FIELD_QUESTIONS[p]}" for p in wanted) +
+        "\n\nShape notes: dates as YYYY-MM-DD; stay.occupancy as an array of "
+        "{adults, children, child_ages} objects, one per room; stay.rooms as "
+        "a plain integer; ota_benchmark.final_payable as a plain number, no "
+        "currency symbol or thousands separators.\n\n"
+        "Also include a \"clarify\" key: a short, specific one-sentence "
+        "question, referencing what they already said, ONLY if the reply "
+        "gave PARTIAL or ambiguous info for one of these fields that you "
+        "could not fully resolve (e.g. they said \"24 Sept to 25 Sept\" "
+        "with no year -> ask which year; they said \"me and my wife\" for "
+        "occupancy with an unclear room count -> ask that). Use null for "
+        "\"clarify\" if the reply either fully answered a field or didn't "
+        "address it at all — don't invent a question otherwise."
+    )
+    user = f"Customer's reply so far (may span more than one message): {reply_text!r}"
+    try:
+        # gpt-oss-120b (Groq's default text model) spends part of its token
+        # budget on internal reasoning before the actual JSON — a tight
+        # budget here truncates before valid JSON is produced and Groq's
+        # json_object mode rejects it outright. 700 is comfortably above
+        # what this small a task needs even with that overhead.
+        raw, _, _ = llm.complete(system, user, max_tokens=700, provider=provider)
+    except Exception:
+        return {}, None
+    raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}, None
+    if not isinstance(data, dict):
+        return {}, None
+    fields = {p: data[p] for p in wanted if data.get(p) is not None}
+    clarify = data.get("clarify")
+    clarify = clarify.strip() if isinstance(clarify, str) and clarify.strip() else None
+    return fields, clarify
+
+
 class LLMExtractionResult:
     def __init__(self, fields: dict, confidence: dict, contradictions: list,
                  provider: str, model: str, raw: str = ""):

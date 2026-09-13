@@ -172,10 +172,10 @@ function render(result, tabId, totalSec, clientMs) {
   ];
   if (rz.available && rz.match) {
     const band = esc(rz.band);
-    rows.push(["TripJack",
+    rows.push(["BookMyStay",
       `<span class="band band-${band}">${band}</span> ${esc(rz.match.tj_id)} · ${esc(rz.match.hotel_name)}`]);
   } else if (rz.available === false) {
-    rows.push(["TripJack", esc(rz.note || "not resolved")]);
+    rows.push(["BookMyStay", esc(rz.note || "not resolved")]);
   }
 
   const best = rz.room_map && rz.room_map.matched ? pickBestOption(rz.room_map) : null;
@@ -198,16 +198,16 @@ function render(result, tabId, totalSec, clientMs) {
     // no inventory for these dates, or no confident room match).
     let why = "no price available";
     if (rz.detail_error) why = "pricing call failed: " + rz.detail_error;
-    else if (rz.detail && !((rz.detail.options || []).length)) why = "TripJack has no inventory for this hotel/stay";
+    else if (rz.detail && !((rz.detail.options || []).length)) why = "no inventory for this hotel/stay";
     else if (rz.room_map && !rz.room_map.matched) why = `no confident room match (best score ${rz.room_map.score ?? "?"})`;
-    rows.push(["YourTravelAgent", `<span style="color:#8b949e">${esc(why)}</span>`]);
+    rows.push(["BookMyStay", `<span style="color:#8b949e">${esc(why)}</span>`]);
   }
   if (best) {
     const band = esc(rz.room_map.band);
-    rows.push(["YourTravelAgent",
+    rows.push(["BookMyStay",
       `<span class="band band-${band === "strong" ? "high" : "medium"}">${band}</span> ` +
       `${esc(best.currency)} ${sellPrice}` +
-      (hasMarkup ? ` <span style="color:#8b949e;font-size:10.5px" title="TripJack's own price before markup">` +
+      (hasMarkup ? ` <span style="color:#8b949e;font-size:10.5px" title="our cost before markup">` +
         `(cost ${esc(best.currency)} ${best.total_price})</span>` : "")]);
 
     const sav = savingsInfo(p.ota_benchmark.final_payable, p.ota_benchmark.currency, sellPrice, best.currency);
@@ -375,7 +375,7 @@ function dealSummaryText(d) {
       ? `\n📉 ${d.tjCurrency} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) cheaper than the OTA`
       : `\n📈 ${d.tjCurrency} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) more than the OTA`;
   }
-  return `Hi! I'd like to book this via YourTravelAgent 🧳\n\n`
+  return `Hi! I'd like to book this via BookMyStay 🧳\n\n`
     + `🏨 ${d.hotelName || "—"}\n`
     + `🛏️ ${d.roomName || "—"}${meal ? " · " + meal : ""}\n`
     + `📅 ${d.checkIn || "?"} → ${d.checkOut || "?"}\n`

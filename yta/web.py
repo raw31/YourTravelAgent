@@ -78,6 +78,333 @@ def _run_job(job_id: str, req: dict) -> None:
     finally:
         job["done"] = True
 
+
+# -- WhatsApp "3rd flow" --------------------------------------------------
+# A customer sends a link or a screenshot on WhatsApp; the bot replies with
+# the same TripJack comparison the panel/extension show. Same
+# extract()+_resolve() pipeline as everywhere else — this only adds a
+# webhook front door and a text-formatted reply.
+
+# In-memory: phone number -> {"packet": BookingIntent, "missing": [paths]}.
+# A customer is "mid-conversation" whenever they're in here — their NEXT
+# message is treated as an answer to the missing-fields question, not as a
+# fresh link/photo. Same pattern/lock style as _JOBS above.
+_WA_SESSIONS: dict = {}
+_WA_SESSIONS_LOCK = threading.Lock()
+
+
+def _occ_field(r, name, default=None):
+    """`stay.occupancy` holds real RoomOccupancy objects on a live packet,
+    but plain dicts once something's gone through .to_dict()/JSON — accept
+    either shape rather than assuming one."""
+    if r is None:
+        return default
+    if isinstance(r, dict):
+        return r.get(name, default)
+    return getattr(r, name, default)
+
+
+def _occ_repr(occ) -> str:
+    if not occ:
+        return "—"
+    parts = []
+    for r in occ:
+        a = _occ_field(r, "adults", "?")
+        c = _occ_field(r, "children", 0) or 0
+        parts.append(f"{a}A" + (f"+{c}C" if c else ""))
+    return ", ".join(parts)
+
+
+def _extracted_lines(packet) -> list:
+    """The hotel/dates/occupancy/room/price facts as extracted so far —
+    shared by the "here's what I found" message and the final reply.
+    Emoji + text label together — the emoji alone ("🏨 Taj Exotica...")
+    takes a beat to parse as "this is the hotel"; the label makes it
+    explicit while the emoji keeps each line quick to scan."""
+    p = packet
+    lines = [
+        f"🏨 Hotel Name : {p.hotel.name or '—'}",
+        f"📅 Dates : {p.stay.check_in or '?'} → {p.stay.check_out or '?'}",
+        f"👥 Room Occupancy : {_occ_repr(p.stay.occupancy)}",
+    ]
+    if p.requested_offer.room_name:
+        lines.append(f"🛏️ Room Type : {p.requested_offer.room_name}")
+    if p.requested_offer.meal_plan:
+        lines.append(f"🍽️ Meal Type : {p.requested_offer.meal_plan}")
+    if p.requested_offer.refundable is True:
+        lines.append("↩️ Refundability : Refundable")
+    elif p.requested_offer.refundable is False:
+        lines.append("↩️ Refundability : Non-refundable")
+    if p.ota_benchmark.final_payable:
+        lines.append(f"💳 Price Shown : {p.ota_benchmark.currency or ''} {p.ota_benchmark.final_payable}")
+    return lines
+
+
+def _ask_for_missing(frm: str, missing: list, clarify: str | None = None) -> None:
+    from yta import whatsapp
+    from yta.extract_llm import FIELD_LABELS
+    labels = [FIELD_LABELS[p] for p in missing if p in FIELD_LABELS]
+    if not labels:
+        return
+    # `clarify` is a specific follow-up (e.g. "which year — you said 24
+    # Sept to 25 Sept?") from extract_clarification() when a reply was
+    # partial rather than absent — that's already a direct, on-point
+    # question, so send it alone rather than also re-listing the field(s)
+    # it's about. Otherwise, ALWAYS one field per line — comma-joining
+    # into a sentence reads fine for 1-2 missing fields and turns into an
+    # unreadable run-on the moment 4-5 are missing at once.
+    if clarify:
+        text = f"{clarify} (or send a new link/photo to start over)"
+    else:
+        text = ("Missing:\n" + "\n".join(labels)
+                + "\n\nReply with these — any format works, or send a new link/photo to start over.")
+    whatsapp.send_text(frm, text)
+
+
+def _whatsapp_reply(packet, resolution: dict | None) -> str:
+    # Deliberately does NOT repeat hotel/dates/occupancy/room/OTA-price —
+    # the "📋 Here's what I found" message already showed all of that a
+    # moment ago. Repeating it here just made the actual quote harder to
+    # read. This message carries only what's NEW: the TripJack quote.
+    ota_price = packet.ota_benchmark.final_payable
+    ota_ccy = packet.ota_benchmark.currency
+
+    rz = resolution or {}
+    room_map = rz.get("room_map") or {}
+    best = None
+    if room_map.get("matched"):
+        opts = room_map.get("rate_options") or []
+        keyed = set(room_map.get("ratekey_option_ids") or [])
+        pool = [o for o in opts if o.get("option_id") in keyed] or opts
+        if pool:
+            best = min(pool, key=lambda o: o.get("total_price", float("inf")))
+
+    if not best:
+        # Never surface rz['note']/rz['detail_error'] raw here — those are
+        # internal wholesale-supplier diagnostics (can literally say things
+        # like "TripJack DB not built") and must never reach a customer.
+        # The real reason is still logged server-side for us to act on.
+        name = packet.hotel.name or "this hotel"
+        reason = (rz.get("note") if rz.get("available") is False
+                  else rz.get("detail_error") if rz.get("detail_error")
+                  else "no confident room/price match" if (rz.get("available") and rz.get("match"))
+                  else "not resolved")
+        print(f"[wa] no live rate for {name!r}: {reason}", flush=True)
+        return f"⚠️ Couldn't get a live rate for {name} right now — I'll take a manual look and follow up."
+
+    # Same generic markup concept as the extension (yta_markup_pct/flat in
+    # its admin page) — no shared per-user config between the two flows
+    # yet, so this is its own env-based knob for now.
+    pct = float(os.environ.get("WHATSAPP_MARKUP_PCT", "0") or 0)
+    flat = float(os.environ.get("WHATSAPP_MARKUP_FLAT", "0") or 0)
+    ccy = best.get("currency", "") or ""
+    sell = round(best.get("total_price", 0) * (1 + pct / 100) + flat, 2)
+
+    comparable = bool(ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
+    if comparable:
+        diff = ota_price - sell
+        dpct = (diff / ota_price * 100) if ota_price else 0
+        cheaper = diff >= 0
+        if not cheaper:
+            # Never show a price that's worse than what the customer
+            # already has on the OTA page — no upside in surfacing that
+            # number, and it undercuts the whole pitch. Say we checked,
+            # not what we found.
+            return ("👍 We checked — the price you already have looks like "
+                     "the best deal for this stay. Nothing better to offer "
+                     "right now.")
+
+    lines = []
+    # WhatsApp renders *single asterisks* as bold. When we actually know
+    # we're cheaper, lead with the win and lay out BookMyStay's own deal
+    # in full — same labeled shape as the "Your deal" summary, but sourced
+    # from what TripJack actually matched/returned (hotel name, room, meal
+    # can each differ in wording from what the OTA page showed) — so the
+    # customer sees exactly what they'd be booking, not just a condensed
+    # price line.
+    if comparable:
+        tj_hotel_name = (rz.get("match") or {}).get("hotel_name") or packet.hotel.name or "—"
+        lines.append("✅ Found you a better rate!")
+        lines.append("")
+        lines.append("BookMyStay's deal:")
+        lines.append("----")
+        lines.append(f"🏨 Hotel Name : {tj_hotel_name}")
+        lines.append(f"📅 Dates : {packet.stay.check_in or '?'} → {packet.stay.check_out or '?'}")
+        lines.append(f"👥 Room Occupancy : {_occ_repr(packet.stay.occupancy)}")
+        lines.append(f"🛏️ Room Type : {best.get('room_name') or '—'}")
+        if best.get("meal_basis"):
+            lines.append(f"🍽️ Meal Type : {best['meal_basis']}")
+        if best.get("refundable") is True:
+            lines.append("↩️ Refundability : Refundable")
+        elif best.get("refundable") is False:
+            lines.append("↩️ Refundability : Non-refundable")
+        if ota_price:
+            lines.append(f"💳 Price Shown In Your Deal : {ota_ccy or ''} {ota_price}")
+        lines.append("")
+        lines.append(f"*💰 BookMyStay price: {ccy} {sell}*")
+        lines.append(f"*📉 {ccy} {abs(diff):.0f} ({abs(dpct):.1f}%) cheaper than your deal*")
+    else:
+        lines.append(f"💰 BookMyStay price: {ccy} {sell}")
+        # Meal plan / refundability come with the matched TripJack option
+        # itself — different rooms/rates at the same hotel can differ on
+        # both, so this is what's ACTUALLY being quoted, not assumed from
+        # the OTA. Bolded specifically (not the room name) since these are
+        # the two terms of the deal the customer needs to confirm.
+        meta_bits = []
+        if best.get("room_name") and best["room_name"] != packet.requested_offer.room_name:
+            meta_bits.append(best["room_name"])
+        if best.get("meal_basis"):
+            meta_bits.append(f"*{best['meal_basis']}*")
+        if best.get("refundable") is True:
+            meta_bits.append("*refundable*")
+        elif best.get("refundable") is False:
+            meta_bits.append("*non-refundable*")
+        if meta_bits:
+            lines.append("🛏️ " + " · ".join(meta_bits))
+
+    lines.append("\nReply to this message to book — we'll confirm and take it from there.")
+    return "\n".join(lines)
+
+
+def _finish_and_reply(frm: str, packet) -> None:
+    from yta import whatsapp
+    # The TripJack resolve+pricing call below is the one genuinely slow
+    # step left with nothing sent back in between — ack it so the wait
+    # doesn't read as the bot having gone silent.
+    whatsapp.send_text(frm, "Fetching the discounted rates for you.")
+    resolution = _resolve(packet) if packet.hotel.name else None
+    reply = _whatsapp_reply(packet, resolution)
+    result = whatsapp.send_text(frm, reply)
+    print(f"[wa] reply sent: status={result.get('_status_code')} error={result.get('error')}", flush=True)
+
+
+# Sending several photos "together" in WhatsApp does NOT arrive as one
+# webhook event — each image is its OWN message, delivered as a separate
+# POST, typically a fraction of a second to a couple seconds apart. Handle
+# each the instant it lands and you get N independent (usually incomplete)
+# extractions instead of one combined one. So inbound messages are
+# buffered per sender for a short debounce window; new messages from the
+# same sender reset the window, and everything collected gets processed
+# together as ONE extraction call once it goes quiet.
+_WA_PENDING: dict = {}          # from -> {"items": [msg, ...], "timer": Timer}
+_WA_PENDING_LOCK = threading.Lock()
+_WA_BATCH_WINDOW_SEC = 3.0
+
+
+def _enqueue_whatsapp_message(msg: dict) -> None:
+    frm = msg.get("from")
+    if not frm:
+        return
+    with _WA_PENDING_LOCK:
+        entry = _WA_PENDING.setdefault(frm, {"items": [], "timer": None})
+        entry["items"].append(msg)
+        count = len(entry["items"])
+        if entry["timer"] is not None:
+            entry["timer"].cancel()
+        t = threading.Timer(_WA_BATCH_WINDOW_SEC, _process_batch, args=(frm,))
+        t.daemon = True
+        entry["timer"] = t
+        t.start()
+    print(f"[wa] buffered message from {frm} (batch now has {count} item(s), window reset)", flush=True)
+
+
+def _process_batch(frm: str) -> None:
+    with _WA_PENDING_LOCK:
+        entry = _WA_PENDING.pop(frm, None)
+    if not entry or not entry["items"]:
+        return
+    items = entry["items"]
+    print(f"[wa] processing batch for {frm}: {len(items)} message(s)", flush=True)
+
+    from yta import whatsapp
+    from yta.extract_llm import extract_clarification
+    from yta.schema import LLM
+
+    with _WA_SESSIONS_LOCK:
+        session = _WA_SESSIONS.get(frm)
+
+    try:
+        if session is not None:
+            # Mid-conversation: these message(s) are the customer answering
+            # our "I couldn't find X" question, not a new link/photo(s).
+            # Accumulate across EVERY clarification turn so far, not just
+            # this one — if we ask "which year?" and they reply just
+            # "2026", that reply alone has no day/month; only combined
+            # with "24 Sept to 25 Sept" from the earlier turn can it
+            # resolve to a real date.
+            new_text = " ".join((m.get("text") or "") for m in items).strip()
+            accumulated = "\n".join(t for t in (session.get("clarify_text"), new_text) if t)
+            print(f"[wa] treating batch as clarification for {frm}: {new_text[:160]!r} "
+                  f"(accumulated: {accumulated[:200]!r})", flush=True)
+            packet = session["packet"]
+            fields, clarify = extract_clarification(session["missing"], accumulated)
+            print(f"[wa] clarification filled: {list(fields.keys())}; note={clarify!r}", flush=True)
+            for path, val in fields.items():
+                packet.add(path, val, LLM, 0.7, "whatsapp clarification")
+            packet.derive_stay()
+            still_missing = packet.check_mandatory()
+            if still_missing:
+                with _WA_SESSIONS_LOCK:
+                    _WA_SESSIONS[frm] = {"packet": packet, "missing": still_missing,
+                                          "clarify_text": accumulated}
+                _ask_for_missing(frm, still_missing, clarify)
+                return
+            with _WA_SESSIONS_LOCK:
+                _WA_SESSIONS.pop(frm, None)
+            _finish_and_reply(frm, packet)
+            return
+
+        # Fresh submission: a link, one or more photos, or both — combine
+        # every item in the batch into a SINGLE extract() call so the model
+        # sees all of it at once (e.g. hotel name in photo 1, price in
+        # photo 3), same as pasting multiple screenshots in the panel.
+        url = None
+        for m in items:
+            url = whatsapp.find_url(m.get("text"))
+            if url:
+                break
+        media_items = []
+        for m in items:
+            if m.get("type") in ("image", "document") and m.get("media_id"):
+                dl = whatsapp.download_media(m["media_id"])
+                if dl:
+                    data, mime = dl
+                    media_items.append({"name": "whatsapp-media", "mime": mime, "bytes": data})
+                    print(f"[wa] downloaded media: {len(data)} bytes, {mime}", flush=True)
+        media = None
+        if media_items:
+            from yta.ingest import load_uploads
+            media = load_uploads(media_items)
+
+        if not url and not media:
+            print("[wa] no link or media found — sending the how-to-use reply", flush=True)
+            whatsapp.send_text(frm, "Send me a hotel booking link or a screenshot "
+                                     "of one and I'll check the best price for it.")
+            return
+
+        whatsapp.send_text(frm, "Checking your deal")   # ack before the (vision) extraction runs
+
+        print(f"[wa] extracting: url={url!r} media_count={len(media_items)}", flush=True)
+        packet = extract(url or "", render=bool(url), media=media, log_sink=[])
+        print(f"[wa] extraction done: hotel={packet.hotel.name!r} status={packet.status}", flush=True)
+
+        whatsapp.send_text(frm, "\n".join(["Your deal:", "----"] + _extracted_lines(packet)))
+
+        missing = packet.missing_mandatory or packet.check_mandatory()
+        if missing:
+            with _WA_SESSIONS_LOCK:
+                _WA_SESSIONS[frm] = {"packet": packet, "missing": missing}
+            _ask_for_missing(frm, missing)
+            return
+
+        _finish_and_reply(frm, packet)
+    except Exception as e:  # noqa: BLE001
+        print(f"[wa] ERROR handling batch: {type(e).__name__}: {e}", flush=True)
+        with _WA_SESSIONS_LOCK:
+            _WA_SESSIONS.pop(frm, None)
+        whatsapp.send_text(frm, f"Sorry, something went wrong: {type(e).__name__}: {e}")
+
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -559,9 +886,37 @@ class Handler(BaseHTTPRequestHandler):
                 out["trace"] = job.get("trace")
             self._send(200, json.dumps(out, default=str).encode("utf-8"))
             return
+        if self.path.startswith("/webhook/whatsapp"):
+            # Meta's webhook-config screen verifies ownership with a GET
+            # carrying hub.mode/hub.verify_token/hub.challenge — echo the
+            # challenge back only if the token matches ours.
+            from yta import whatsapp
+            challenge = whatsapp.verify_challenge(parse_qs(urlparse(self.path).query))
+            if challenge is not None:
+                self._send(200, challenge.encode("utf-8"), "text/plain; charset=utf-8")
+            else:
+                self._send(403, b"forbidden", "text/plain; charset=utf-8")
+            return
         self._send(404, b'{"error":"not found"}')
 
     def do_POST(self):
+        if self.path == "/webhook/whatsapp":
+            # Inbound WhatsApp message delivery. Meta expects a fast 2xx
+            # ack (it retries on timeout/5xx) — acknowledge immediately,
+            # then do the actual extract+resolve+reply per message in a
+            # background thread, same pattern as /api/extract's job runner.
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            self._send(200, b'{"status":"ok"}')
+            from yta import whatsapp
+            msgs = whatsapp.parse_inbound(payload)
+            print(f"[wa] webhook POST received, {len(msgs)} message(s) parsed", flush=True)
+            for msg in msgs:
+                _enqueue_whatsapp_message(msg)   # debounced — see _WA_PENDING above
+            return
         if self.path not in ("/api/extract", "/api/review"):
             self._send(404, b'{"error":"not found"}')
             return
