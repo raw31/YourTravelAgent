@@ -357,10 +357,27 @@ def _process_batch(frm: str) -> None:
             # resolve to a real date.
             new_text = " ".join((m.get("text") or "") for m in items).strip()
             accumulated = "\n".join(t for t in (session.get("clarify_text"), new_text) if t)
+            # A clarification reply is often ANOTHER screenshot (e.g. "what's
+            # the price?" answered with a photo of the price breakdown), not
+            # typed text — without downloading it here, that reply was
+            # silently dropped and the bot just re-asked the same question
+            # forever. Same download path the fresh-submission branch uses.
+            clarify_media_items = []
+            for m in items:
+                if m.get("type") in ("image", "document") and m.get("media_id"):
+                    dl = whatsapp.download_media(m["media_id"])
+                    if dl:
+                        data, mime = dl
+                        clarify_media_items.append({"name": "whatsapp-media", "mime": mime, "bytes": data})
+                        print(f"[wa] downloaded clarification media: {len(data)} bytes, {mime}", flush=True)
+            clarify_media = None
+            if clarify_media_items:
+                from yta.ingest import load_uploads
+                clarify_media = load_uploads(clarify_media_items)
             print(f"[wa] treating batch as clarification for {frm}: {new_text[:160]!r} "
-                  f"(accumulated: {accumulated[:200]!r})", flush=True)
+                  f"(accumulated: {accumulated[:200]!r}, media_count={len(clarify_media_items)})", flush=True)
             packet = session["packet"]
-            fields, clarify = extract_clarification(session["missing"], accumulated)
+            fields, clarify = extract_clarification(session["missing"], accumulated, media=clarify_media)
             print(f"[wa] clarification filled: {list(fields.keys())}; note={clarify!r}", flush=True)
             for path, val in fields.items():
                 packet.add(path, val, LLM, 0.7, "whatsapp clarification")

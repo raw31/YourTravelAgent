@@ -201,14 +201,18 @@ FIELD_LABELS = {
 
 
 def extract_clarification(missing_paths: list, reply_text: str,
+                           media: list | None = None,
                            provider: str | None = None) -> tuple:
     """A small, targeted follow-up call — NOT the full page extraction.
     Given exactly the mandatory fields still missing and a customer's
-    plain-language reply so far (no page content involved — see the
-    caller for why this should be the FULL accumulated conversation, not
-    just the latest message), fill in whichever fields the reply actually
-    answers. Used by the WhatsApp flow when a link/screenshot didn't have
-    everything mandatory.
+    reply so far (text and/or a photo — see the caller for why the TEXT
+    should be the FULL accumulated conversation, not just the latest
+    message), fill in whichever fields the reply actually answers. Used
+    by the WhatsApp flow when a link/screenshot didn't have everything
+    mandatory. `media` matters: a customer asked for a missing price
+    will often just reply with ANOTHER screenshot showing it, not type
+    it out — without vision here that reply was silently dropped and the
+    bot just asked the same question again forever.
 
     Returns (fields: dict, clarify: str | None). `fields` never guesses —
     a field stays absent rather than invented. `clarify` is a short,
@@ -218,17 +222,23 @@ def extract_clarification(missing_paths: list, reply_text: str,
     what's missing instead of repeating the whole field list verbatim,
     which reads as the bot having ignored what was already said."""
     wanted = [p for p in missing_paths if p in FIELD_QUESTIONS]
-    if not wanted or not (reply_text or "").strip():
+    if not wanted or not ((reply_text or "").strip() or media):
         return {}, None
     system = (
         "A hotel-booking assistant is missing a few details and asked the "
-        "customer for them in plain language. Extract ONLY the fields "
-        "listed below from their reply. Use null for anything not actually "
-        "answered — never guess or invent a value (e.g. a date with no "
-        "year given stays null, don't assume a year). Reply with JSON "
-        "only.\n\n"
+        "customer for them. Their reply may be plain text, a photo (e.g. "
+        "a screenshot of a price or booking page), or both. Extract ONLY "
+        "the fields listed below from whatever they gave you. Use null "
+        "for anything not actually answered — never guess or invent a "
+        "value (e.g. a date with no year given stays null, don't assume "
+        "a year). Reply with JSON only.\n\n"
         "Fields:\n" + "\n".join(f"  {p} — {FIELD_QUESTIONS[p]}" for p in wanted) +
-        "\n\nShape notes: dates as YYYY-MM-DD; stay.occupancy as an array of "
+        "\n\nReturn a FLAT JSON object. Each field above must be a top-level "
+        "key using its EXACT dotted string as written, e.g. the literal key "
+        f"{json.dumps(wanted[0])} — do NOT nest by splitting on the dot "
+        "(that means NOT {\"" + wanted[0].split(".")[0] + "\": {\"" +
+        wanted[0].split(".", 1)[1] + "\": ...}}).\n\n"
+        "Shape notes: dates as YYYY-MM-DD; stay.occupancy as an array of "
         "{adults, children, child_ages} objects, one per room; stay.rooms as "
         "a plain integer; ota_benchmark.final_payable as a plain number, no "
         "currency symbol or thousands separators.\n\n"
@@ -242,13 +252,17 @@ def extract_clarification(missing_paths: list, reply_text: str,
         "address it at all — don't invent a question otherwise."
     )
     user = f"Customer's reply so far (may span more than one message): {reply_text!r}"
+    if media:
+        user += "\n\nA photo from the customer is attached below — read it too."
     try:
         # gpt-oss-120b (Groq's default text model) spends part of its token
         # budget on internal reasoning before the actual JSON — a tight
         # budget here truncates before valid JSON is produced and Groq's
         # json_object mode rejects it outright. 700 is comfortably above
-        # what this small a task needs even with that overhead.
-        raw, _, _ = llm.complete(system, user, max_tokens=700, provider=provider)
+        # what this small a task needs even with that overhead. `media`
+        # forces the vision provider chain the same way the main
+        # extraction does (yta.llm.complete picks it automatically).
+        raw, _, _ = llm.complete(system, user, max_tokens=700, media=media, provider=provider)
     except Exception:
         return {}, None
     raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
@@ -258,7 +272,20 @@ def extract_clarification(missing_paths: list, reply_text: str,
         return {}, None
     if not isinstance(data, dict):
         return {}, None
-    fields = {p: data[p] for p in wanted if data.get(p) is not None}
+    # The prompt asks for flat dotted keys, but vision models sometimes nest
+    # by the dot anyway (e.g. {"ota_benchmark": {"final_payable": 31683}}
+    # instead of {"ota_benchmark.final_payable": 31683}) despite being told
+    # not to — flatten defensively so a field isn't silently lost to that.
+    def _get(d: dict, path: str):
+        if path in d and d[path] is not None:
+            return d[path]
+        cur = d
+        for part in path.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return None
+            cur = cur[part]
+        return cur
+    fields = {p: v for p in wanted if (v := _get(data, p)) is not None}
     clarify = data.get("clarify")
     clarify = clarify.strip() if isinstance(clarify, str) and clarify.strip() else None
     return fields, clarify
