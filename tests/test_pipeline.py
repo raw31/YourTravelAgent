@@ -112,6 +112,35 @@ def test_clean_text_defangs_markup():
     assert clean_text("  <script>Deluxe\n Room</script> ") == "scriptDeluxe Room/script"
 
 
+# -- currency normalization -------------------------------------------
+
+def test_normalize_currency_maps_common_symbols_to_iso():
+    from yta.schema import normalize_currency
+    assert normalize_currency("Rs") == "INR"
+    assert normalize_currency("Rs.") == "INR"
+    assert normalize_currency("₹") == "INR"
+    assert normalize_currency("rupees") == "INR"
+    assert normalize_currency("usd") == "USD"
+    assert normalize_currency("$") == "USD"
+    assert normalize_currency("INR") == "INR"          # already clean -- unchanged
+    assert normalize_currency(None) is None
+
+
+def test_packet_add_normalizes_currency_on_write():
+    p = BookingIntent(source=Source(ota="agoda", url="x"))
+    p.add("ota_benchmark.currency", "Rs.", "llm", 0.8)
+    assert p.ota_benchmark.currency == "INR"
+
+
+def test_currency_mismatch_from_symbol_no_longer_blocks_comparison():
+    # this is the exact bug: a price screenshot showing "Rs. 31,683" used to
+    # leave ota_benchmark.currency as "Rs." (or unset), which never matched
+    # TripJack's "INR" and silently killed the price-comparison message.
+    p = BookingIntent(source=Source(ota="agoda", url="x"))
+    p.add("ota_benchmark.currency", "Rs.", "llm", 0.8)
+    assert p.ota_benchmark.currency.upper() == "INR".upper()
+
+
 # -- mandatory-field gate -------------------------------------
 
 def test_mandatory_fail_lists_missing():

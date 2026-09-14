@@ -224,6 +224,15 @@ def extract_clarification(missing_paths: list, reply_text: str,
     wanted = [p for p in missing_paths if p in FIELD_QUESTIONS]
     if not wanted or not ((reply_text or "").strip() or media):
         return {}, None
+    # ota_benchmark.currency is never itself mandatory (see schema.py), so
+    # it never appears in `wanted` on its own — but a reply that answers
+    # final_payable is almost always a price screenshot, which shows its
+    # currency right next to the number. Ask for it as a bonus whenever
+    # price is being asked about, or ota_benchmark.currency silently stays
+    # null forever and the customer never gets a "cheaper than your deal"
+    # comparison (yta/wa_shared.py's comparable check needs both set).
+    bonus = ["ota_benchmark.currency"] if "ota_benchmark.final_payable" in wanted and \
+        "ota_benchmark.currency" not in wanted else []
     system = (
         "A hotel-booking assistant is missing a few details and asked the "
         "customer for them. Their reply may be plain text, a photo (e.g. "
@@ -233,6 +242,9 @@ def extract_clarification(missing_paths: list, reply_text: str,
         "value (e.g. a date with no year given stays null, don't assume "
         "a year). Reply with JSON only.\n\n"
         "Fields:\n" + "\n".join(f"  {p} — {FIELD_QUESTIONS[p]}" for p in wanted) +
+        ("\n  ota_benchmark.currency — the ISO currency code (INR, USD, EUR, "
+         "...) the price is shown in, if visible alongside it. Optional — "
+         "null if you can't tell, never guess." if bonus else "") +
         "\n\nReturn a FLAT JSON object. Each field above must be a top-level "
         "key using its EXACT dotted string as written, e.g. the literal key "
         f"{json.dumps(wanted[0])} — do NOT nest by splitting on the dot "
@@ -285,7 +297,7 @@ def extract_clarification(missing_paths: list, reply_text: str,
                 return None
             cur = cur[part]
         return cur
-    fields = {p: v for p in wanted if (v := _get(data, p)) is not None}
+    fields = {p: v for p in wanted + bonus if (v := _get(data, p)) is not None}
     clarify = data.get("clarify")
     clarify = clarify.strip() if isinstance(clarify, str) and clarify.strip() else None
     return fields, clarify

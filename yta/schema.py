@@ -218,6 +218,8 @@ class BookingIntent:
             value = clean_text(value)
             if not value:
                 return
+        if path == "ota_benchmark.currency":
+            value = normalize_currency(value)
         obj_path, _, attr = path.rpartition(".")
         target = self
         for part in obj_path.split("."):
@@ -277,6 +279,34 @@ def clean_text(value, max_len: int = 400) -> str:
     s = s.replace("<", "").replace(">", "")
     s = _WS_RE.sub(" ", s).strip()
     return s[:max_len]
+
+
+# ota_benchmark.currency needs to be a clean ISO code — it's compared
+# with `==` against TripJack's own ISO code (yta/wa_shared.py's
+# comparable = ota_ccy.upper() == ccy.upper()) to decide whether to show
+# the customer a price comparison at all. The extraction prompt already
+# asks for ISO codes, but a screenshot showing "Rs." or "₹" instead of
+# "INR" is exactly the kind of thing a vision model echoes verbatim
+# rather than translating — silently breaking that comparison with no
+# visible error. Normalize the common symbols/abbreviations here, in
+# packet.add() below, so it's caught regardless of which extraction path
+# (full page, clarification reply, extension capture) the value came
+# through.
+_CURRENCY_ALIASES = {
+    "RS": "INR", "RS.": "INR", "RUPEE": "INR", "RUPEES": "INR",
+    "INR.": "INR", "₹": "INR",
+    "USD.": "USD", "US$": "USD", "$": "USD",
+    "EUR.": "EUR", "€": "EUR",
+    "GBP.": "GBP", "£": "GBP",
+    "AED.": "AED", "DHS": "AED", "DIRHAM": "AED", "DIRHAMS": "AED",
+}
+
+
+def normalize_currency(value):
+    if not value:
+        return value
+    key = str(value).strip().upper()
+    return _CURRENCY_ALIASES.get(key, key)
 
 
 # -- dates -------------------------------------------------------------
