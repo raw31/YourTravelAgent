@@ -4,8 +4,17 @@
 
 Paste an OTA booking URL, get the Booking Intent packet, the per-field
 evidence trail, and validation warnings. Zero extra dependencies (stdlib
-http.server). Localhost only — this is an internal review tool, not a
-service.
+http.server). Also serves the WhatsApp "3rd flow" webhook (yta/whatsapp.py)
+— so while the debug panel itself is meant for local/internal use, this
+process as a whole is a real service when deployed (Railway, etc.), not
+localhost-only anymore.
+
+HOST/PORT come from the environment so the same code runs unchanged
+locally (defaults: 0.0.0.0:8765) and on a PaaS like Railway, which injects
+its own PORT and expects the app to bind 0.0.0.0 (not 127.0.0.1— that
+only accepts connections FROM the container itself, which is why an app
+that only ever bound loopback would look "up" in logs but be completely
+unreachable from the platform's router).
 """
 from __future__ import annotations
 
@@ -21,7 +30,8 @@ from urllib.parse import urlparse, parse_qs
 from yta.pipeline import extract
 from yta.profiles import route
 
-HOST, PORT = "127.0.0.1", 8765
+HOST = os.environ.get("HOST", "0.0.0.0")
+PORT = int(os.environ.get("PORT", 8765))
 
 # in-memory job registry: job_id -> {log: [...], done: bool, result / error}
 _JOBS: dict = {}

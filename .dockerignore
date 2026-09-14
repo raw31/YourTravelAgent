@@ -1,0 +1,20 @@
+# Secrets — real values come from Railway's own environment variables,
+# never baked into the image.
+.env
+
+# The 1.2GB hotel DB — belongs on a mounted Volume, not in the image.
+data/
+
+# Everything not needed to run the backend service.
+extension/
+scratch/
+tests/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+*.db-wal
+*.docx
+README.md

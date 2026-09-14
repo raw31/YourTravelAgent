@@ -1,16 +1,21 @@
 # core (URL-param extraction — the Phase-1 MVP path)
-requests>=2.31
-lxml>=5.0
+requests==2.32.5
+lxml==6.1.0
 
 # LLM extraction
-openai>=1.40            # text: Groq / Grok / OpenAI (all OpenAI-compatible)
-google-genai>=0.3       # image / PDF uploads: Gemini vision
-python-dotenv>=1.0      # loads YourTravelAgent/.env
-# anthropic>=0.40       # optional: LLM_PROVIDER=anthropic (text + vision)
+openai==2.48.0           # text: Groq / Grok / OpenAI (all OpenAI-compatible)
+google-genai==1.47.0     # image / PDF uploads: Gemini vision
+anthropic==0.121.0       # optional: LLM_PROVIDER=anthropic (text + vision)
+python-dotenv==1.2.1     # loads YourTravelAgent/.env
 
-# optional browser enrichment (MMT price/name/room; Booking/Agoda DOM)
-#   pip install playwright && playwright install chromium
-# playwright>=1.44
+# hotel-identity resolution (yta/hoteldb) — fuzzy name matching
+rapidfuzz==3.13.0
+Unidecode==1.4.0
+
+# browser enrichment (MMT price/name/room; Booking/Agoda DOM; the WhatsApp
+# flow's link-only path) — needs `playwright install --with-deps chromium`
+# after pip install, see Dockerfile.
+playwright==1.60.0
 
 # dev
-pytest>=8.0
+pytest==8.4.2
