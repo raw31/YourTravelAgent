@@ -36,4 +36,7 @@ COPY yta/ ./yta/
 
 # Railway injects PORT at runtime; yta/web.py already reads it (falls
 # back to 8765 if unset, e.g. running this image anywhere else).
-CMD ["python", "-m", "yta.web"]
+# -u (unbuffered) — without it, print()'d log lines sit in a buffer and
+# never reach `docker logs` until it fills or the process exits, the
+# exact same issue this project already hit once running locally.
+CMD ["python", "-u", "-m", "yta.web"]
