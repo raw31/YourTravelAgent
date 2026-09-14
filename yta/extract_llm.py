@@ -179,7 +179,6 @@ FIELD_QUESTIONS = {
     "stay.rooms": "the number of rooms",
     "stay.occupancy": "adults/children (and ages) per room",
     "requested_offer.room_name": "the room type you booked",
-    "requested_offer.room_detail": "any room detail — bed type, view, or a short description",
     "ota_benchmark.final_payable": "the total price shown on the page",
 }
 
@@ -197,7 +196,6 @@ FIELD_LABELS = {
     "stay.rooms": "🚪 Number of Rooms",
     "stay.occupancy": '👥 Occupancy (e.g. "1 Room 2 Adults, 1 Room 1 Adult 1 Child")',
     "requested_offer.room_name": "🛏️ Room Name",
-    "requested_offer.room_detail": "🛏️ Room Detail (bed type / view / description)",
     "ota_benchmark.final_payable": "💳 Total Price Shown on the Page",
 }
 

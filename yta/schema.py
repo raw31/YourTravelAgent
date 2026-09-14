@@ -164,11 +164,15 @@ MANDATORY_FIELDS = (
     ("stay.rooms",                   lambda p: p.stay.rooms),
     ("stay.occupancy",               lambda p: bool(p.stay.occupancy)),
     ("requested_offer.room_name",    lambda p: p.requested_offer.room_name),
-    # "room detail" — a prose description OR the bed/view fields that describe
-    # the same thing. Many OTAs never show a separate description blurb.
-    ("requested_offer.room_detail",  lambda p: bool(
-        p.requested_offer.description or p.requested_offer.bed_type
-        or p.requested_offer.view)),
+    # room_detail (description/bed_type/view) deliberately NOT mandatory —
+    # confirmed unused for anything essential downstream: TripJack's
+    # pricing call needs only hid/dates/occupancy/currency, and room
+    # matching's real gate is `offer.room_name` alone (roommap/match.py) —
+    # description/bed_type only ever feed the OPTIONAL LLM tie-break/
+    # confirm helpers for a genuine ambiguity, `view` is only a fallback
+    # when the room name itself doesn't already carry it. Still captured
+    # opportunistically when present (helps those tie-breaks), just never
+    # blocks the flow or triggers a clarification round on its own.
     ("ota_benchmark.final_payable",  lambda p: p.ota_benchmark.final_payable),
 )
 

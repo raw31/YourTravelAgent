@@ -363,18 +363,6 @@ def _process_batch(frm: str) -> None:
             fields, clarify = extract_clarification(session["missing"], accumulated)
             print(f"[wa] clarification filled: {list(fields.keys())}; note={clarify!r}", flush=True)
             for path, val in fields.items():
-                if path == "requested_offer.room_detail":
-                    # Virtual/computed field (see MANDATORY_FIELDS in
-                    # schema.py) — NOT a real attribute on Offer, it's a
-                    # check over description/bed_type/view. Writing it
-                    # directly creates a phantom attribute check_mandatory()
-                    # never looks at, so this field could never actually
-                    # resolve via clarification — confirmed live: a
-                    # customer answered "Deluxe" -> "Deluxe room" ->
-                    # "Deluxe room with breakfast" and the bot kept asking
-                    # for the same thing forever. Route it to the generic
-                    # free-text field instead, which the check does look at.
-                    path = "requested_offer.description"
                 packet.add(path, val, LLM, 0.7, "whatsapp clarification")
             packet.derive_stay()
             still_missing = packet.check_mandatory()

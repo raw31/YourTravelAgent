@@ -122,18 +122,28 @@ def test_mandatory_fail_lists_missing():
     assert p.status == "fail"
     assert set(missing) == {
         "hotel.name", "stay.check_in", "stay.check_out", "stay.rooms",
-        "stay.occupancy", "requested_offer.room_detail"}
+        "stay.occupancy"}
 
 
-def test_room_detail_satisfied_by_bed_type_alone():
+def test_room_detail_is_not_mandatory():
+    # description/bed_type/view are deliberately optional now — confirmed
+    # unused for anything essential: TripJack's pricing call needs only
+    # hid/dates/occupancy/currency, and room matching's real gate is
+    # offer.room_name alone (description/bed_type only feed the OPTIONAL
+    # LLM tie-break helpers). A packet with none of the three should still
+    # be otherwise-complete/"ok", not blocked waiting on this.
     p = BookingIntent(source=Source(ota="agoda", url="x"))
     p.hotel.name = "X"
     p.stay.check_in, p.stay.check_out = "2026-09-21", "2026-09-22"
     p.stay.set_occupancy([{"adults": 2, "children": 0, "child_ages": []}])
     p.requested_offer.room_name = "Standard Room"
-    p.requested_offer.bed_type = "1 king bed"          # no prose description
     p.ota_benchmark.final_payable = 5000
-    assert "requested_offer.room_detail" not in p.check_mandatory()
+    assert p.requested_offer.description is None
+    assert p.requested_offer.bed_type is None
+    assert p.requested_offer.view is None
+    missing = p.check_mandatory()
+    assert missing == []
+    assert p.status == "ok"
 
 
 def test_mandatory_ok_when_all_present():
