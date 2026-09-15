@@ -94,8 +94,17 @@ def _open_presented(age_sec=0, resolution=None, savings_line=None, confirm_line=
 
 def test_onboarding_message_names_what_to_send(sent):
     v3.handle_batch("cust", [{"type": "text", "text": "hi"}])
-    assert any("hotel" in m[1].lower() and "price" in m[1].lower()
-               for m in sent if m[0] == "text")
+    text = next(m[1] for m in sent if m[0] == "text")
+    assert "link" in text.lower() and "room" in text.lower() and "price" in text.lower()
+
+
+def test_onboarding_never_mentions_the_sourcing_mechanism(sent):
+    # The bot's own edge (wholesale rates) is deliberately never named to
+    # a customer -- the pitch stays outcome-focused ("a better rate"),
+    # not mechanism-focused.
+    v3.handle_batch("cust", [{"type": "text", "text": "hi"}])
+    text = next(m[1] for m in sent if m[0] == "text")
+    assert "wholesale" not in text.lower()
 
 
 def test_onboarding_never_calls_itself_a_checker_or_bot(sent):
@@ -178,7 +187,7 @@ def test_abandoned_session_past_the_hygiene_backstop_is_cleared(sent, monkeypatc
     assert "cust" not in v3._WA_SESSIONS
     # a bare number with no hotel context left should ask for the link/photo,
     # not be silently absorbed as an answer to the (now-cleared) question
-    assert any("hotel" in m[1].lower() for m in sent if m[0] == "text")
+    assert any("send me the link" in m[1].lower() for m in sent if m[0] == "text")
 
 
 # -- bounded slot-filling ----------------------------------------------

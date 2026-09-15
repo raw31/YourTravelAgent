@@ -129,10 +129,18 @@ _PENDING_REFERRALS: dict = {}
 _READABLE_TYPES = ("text", "image", "document", "button_reply")
 
 _ONBOARDING_TEXT = (
-    "I'm here to help you find a better rate on your stay. Send me the "
-    "hotel's booking link, or a screenshot taken after you've selected "
-    "your room — showing the hotel, dates, room type, and the total "
-    "price — and I'll take it from there."
+    "Hi! I'm here to find you a better rate before you book — "
+    "I often find one 10–15% lower than what's showing.\n\n"
+    "Once you've finalized the room and hotel, send me the link or a "
+    "screenshot showing:\n"
+    "• Hotel name\n"
+    "• Dates\n"
+    "• Guest count\n"
+    "• Room type\n"
+    "• Total price\n\n"
+    "A couple of screenshots work just as well if it doesn't fit in one. "
+    "If I find a better deal, I'll show you the savings — no obligation "
+    "to book through me."
 )
 
 # Rotated rather than fixed so the same customer never sees the exact
