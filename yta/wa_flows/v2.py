@@ -3,10 +3,9 @@ confirm/decline step, and a lead recorded for a human to call.
 
 Starts from v1's intent routing (cancel handled in any state, unsupported
 content gets a real reply, a fresh link mid-clarification is treated as
-switching hotels, a session expires after 5 minutes of silence) — v1.py
-itself is untouched; this is a separate module with its own session store
-so v0 and v1 keep working exactly as they do today regardless of which
-flow is active.
+switching hotels) — v1.py itself is untouched; this is a separate module
+with its own session store so v0 and v1 keep working exactly as they do
+today regardless of which flow is active.
 
 What v2 adds on top:
 
@@ -14,11 +13,19 @@ What v2 adds on top:
      the customer what to send (hotel name/dates/room/price visible in
      the screenshot), instead of a bare one-liner.
   2. A hard cap on unproductive clarification rounds (_MAX_UNPRODUCTIVE_
-     ATTEMPTS) — v1's AWAITING_FIELD state can, in principle, stay open
-     forever as long as the customer replies with *something* inside every
-     5-minute window. v2 gives up gracefully after a couple of rounds that
-     don't answer what was asked, per the standard "bounded fallback, then
-     handoff" pattern.
+     ATTEMPTS) instead of a wall-clock session timeout. v1 (and v2's own
+     first cut) expired a session after N minutes of silence — live
+     testing proved that wrong twice over: a customer who takes 6, 15, or
+     24 minutes to go find the right screenshot is still answering the
+     SAME question, not starting a new conversation, and a clock can't
+     tell those apart. Content can: an incoming reply with no URL is
+     always tried against the open question first via
+     extract_clarification(), no matter how much time has passed: a
+     price screenshot from an hour ago still answers "what's the price."
+     Only replies that genuinely don't answer anything (checked by
+     content, not by a timer) count against the 2-attempt cap before the
+     bot gives up — see the standard "bounded fallback, then handoff"
+     pattern this follows.
   3. A PRESENTED state — once a deal is actually quoted, v1 just stops.
      v2 asks the customer to confirm (WhatsApp reply buttons, since the
      Cloud API doesn't support free-text input on a button — only
@@ -29,11 +36,18 @@ What v2 adds on top:
      the "no live rate" reply, so the customer always has a visible way
      back to the start instead of needing to know to type "cancel".
 
+A session is only ever dropped by: CANCEL (explicit or a fresh URL,
+treated as an implicit "different hotel"), the unproductive-attempt cap,
+a confirm/decline in PRESENTED, or an error. There's still a very long
+(_SESSION_MAX_AGE_SEC) backstop, but that's pure memory hygiene for a
+number that genuinely never comes back — not a UX gate, and long enough
+that no real reply should ever hit it.
+
 Every path below ends at one of: COMPLETED handled via CONFIRMED/DECLINED,
-CANCELLED, GAVE_UP, EXPIRED_RESTARTED, or ERROR — all of which clear
-_WA_SESSIONS[frm]. Session dict shape: {"state": "awaiting_field" |
-"presented", "packet", "missing"?, "clarify_text"?, "unproductive_attempts"?,
-"resolution"?, "last_activity"}.
+CANCELLED, GAVE_UP, or ERROR — all of which clear _WA_SESSIONS[frm].
+Session dict shape: {"state": "awaiting_field" | "presented", "packet",
+"missing"?, "clarify_text"?, "unproductive_attempts"?, "resolution"?,
+"last_activity"}.
 """
 from __future__ import annotations
 
@@ -45,15 +59,16 @@ from yta.wa_shared import ask_for_missing, extracted_lines, wa_send, whatsapp_re
 
 _WA_SESSIONS: dict = {}
 _WA_SESSIONS_LOCK = threading.Lock()
-# 5 minutes (v1's original value) turned out too short in live testing: a
-# customer asked for the price screenshot needs time to switch apps, find
-# the checkout page, and screenshot it -- a genuine reply arriving just
-# over 5 minutes late was expiring the session and silently discarding
-# the hotel name/dates/occupancy already captured, forcing a restart from
-# a bare price with no context. 15 minutes comfortably covers that without
-# meaningfully weakening the point of a timeout (a customer who's truly
-# moved on to something else).
-_SESSION_TIMEOUT_SEC = 15 * 60
+# Both 5 and 15 minutes turned out wrong in live testing -- a customer
+# asked for a price screenshot needs however long it takes to switch
+# apps, find the checkout page, and come back, and no fixed number ever
+# covers that reliably. A wall-clock cutoff was the wrong tool for "is
+# this reply still relevant" -- content answers that question directly
+# (does it fill the field we asked about?), so that's what gates the
+# conversation now (_MAX_UNPRODUCTIVE_ATTEMPTS below). This stays only as
+# a memory-hygiene backstop for a number that genuinely never replies
+# again, not as a UX timeout -- no real reply should ever hit it.
+_SESSION_MAX_AGE_SEC = 24 * 60 * 60
 _MAX_UNPRODUCTIVE_ATTEMPTS = 2   # "after two fallback attempts, suggest human assistance"
 
 _CANCEL_RE = re.compile(
@@ -248,8 +263,9 @@ def handle_batch(frm: str, items: list) -> None:
     with _WA_SESSIONS_LOCK:
         session = _WA_SESSIONS.get(frm)
 
-    if session is not None and time.time() - session.get("last_activity", 0) > _SESSION_TIMEOUT_SEC:
-        print(f"[wa v2] session for {frm} expired (idle > {_SESSION_TIMEOUT_SEC}s) — starting fresh", flush=True)
+    if session is not None and time.time() - session.get("last_activity", 0) > _SESSION_MAX_AGE_SEC:
+        print(f"[wa v2] session for {frm} abandoned (idle > {_SESSION_MAX_AGE_SEC}s) — clearing it "
+              f"(memory hygiene, not a reply-relevance judgment)", flush=True)
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS.pop(frm, None)
         session = None
