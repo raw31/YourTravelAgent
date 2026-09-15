@@ -227,17 +227,24 @@ def _recap_block(packet) -> str:
     """The facts a customer would actually want to verify, as a clean
     labeled block -- kept structured on purpose even though the messages
     around it are conversational. See the module docstring: dissolving
-    this into prose was tried and rejected as harder to scan."""
+    this into prose was tried and rejected as harder to scan.
+
+    One icon per CATEGORY of fact (hotel / dates+guests / room / price),
+    never one per individual field -- the middle ground picked after
+    trying both zero icons and one on every line. Keep this exact set
+    (🏨 📅 🛏️ 💰) and placement in sync with _deal_recap_block() and
+    _deal_message() below -- same visual language everywhere a
+    structured fact block appears."""
     lines = []
     if packet.hotel.name:
-        lines.append(f"*{packet.hotel.name}*")
+        lines.append(f"🏨 *{packet.hotel.name}*")
     date_occ = []
     if packet.stay.check_in and packet.stay.check_out:
         date_occ.append(f"{_short_date(packet.stay.check_in)} → {_short_date(packet.stay.check_out)}")
     if packet.stay.occupancy:
         date_occ.append(occ_repr(packet.stay.occupancy))
     if date_occ:
-        lines.append(" · ".join(date_occ))
+        lines.append("📅 " + " · ".join(date_occ))
     room_bits = []
     room_name = _clean_room_name(packet.requested_offer.room_name)
     if room_name:
@@ -249,10 +256,10 @@ def _recap_block(packet) -> str:
     elif packet.requested_offer.refundable is False:
         room_bits.append("Non-refundable")
     if room_bits:
-        lines.append(" · ".join(room_bits))
+        lines.append("🛏️ " + " · ".join(room_bits))
     if packet.ota_benchmark.final_payable:
         ccy = (packet.ota_benchmark.currency or "").strip()
-        lines.append(f"Price shown: {ccy} {packet.ota_benchmark.final_payable:,.0f}".replace("  ", " "))
+        lines.append(f"💰 Price shown: {ccy} {packet.ota_benchmark.final_payable:,.0f}".replace("  ", " "))
     return "\n".join(lines)
 
 
@@ -295,14 +302,14 @@ def _deal_recap_block(packet, best: dict) -> str:
     those still come straight from the packet."""
     lines = []
     if packet.hotel.name:
-        lines.append(f"*{packet.hotel.name}*")
+        lines.append(f"🏨 *{packet.hotel.name}*")
     date_occ = []
     if packet.stay.check_in and packet.stay.check_out:
         date_occ.append(f"{_short_date(packet.stay.check_in)} → {_short_date(packet.stay.check_out)}")
     if packet.stay.occupancy:
         date_occ.append(occ_repr(packet.stay.occupancy))
     if date_occ:
-        lines.append(" · ".join(date_occ))
+        lines.append("📅 " + " · ".join(date_occ))
     room_bits = []
     room_name = _clean_room_name(best.get("room_name") or packet.requested_offer.room_name)
     if room_name:
@@ -318,7 +325,7 @@ def _deal_recap_block(packet, best: dict) -> str:
     elif refundable is False:
         room_bits.append("Non-refundable")
     if room_bits:
-        lines.append(" · ".join(room_bits))
+        lines.append("🛏️ " + " · ".join(room_bits))
     return "\n".join(lines)
 
 
@@ -362,7 +369,7 @@ def _deal_message(packet, resolution) -> tuple:
 
     recap = _deal_recap_block(packet, best)
 
-    lines = ["*Good news — I found you a better rate.*", "", recap, ""]
+    lines = ["*Good news — I found you a better rate.*", "", recap, "", "💰"]
     if comparable:
         diff = ota_price - sell
         dpct = (diff / ota_price * 100) if ota_price else 0

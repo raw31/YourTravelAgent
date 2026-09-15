@@ -291,6 +291,30 @@ def test_shouty_and_stray_punctuation_room_names_get_cleaned_up(sent, monkeypatc
     assert "Deluxe Room" in body
 
 
+def test_category_icons_are_consistent_between_recap_and_deal_card(sent, monkeypatch):
+    # One icon per category of fact (hotel/dates/room), the same set and
+    # placement in both the "here's what I read" recap and the deal card
+    # -- picked after reviewing five styles side by side. Never one icon
+    # per individual field (the version that got called "tacky").
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://booking.com/x")
+    monkeypatch.setattr("yta.pipeline.extract",
+                         lambda *a, **kw: _Packet(missing=["ota_benchmark.final_payable"]))
+    v2.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x"}])
+    ask_body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "🏨" in ask_body and "📅" in ask_body and "🛏️" in ask_body
+
+    sent.clear()
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {"room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+            {"option_id": "o1", "room_name": "Deluxe Room", "currency": "INR", "total_price": 28015.64},
+        ]}},
+    )
+    v2._present_deal("cust", _Packet())
+    deal_body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "🏨" in deal_body and "📅" in deal_body and "🛏️" in deal_body and "💰" in deal_body
+
+
 def test_cheaper_rate_shows_structured_savings_and_confirm_buttons(sent, monkeypatch):
     monkeypatch.setattr(
         "yta.web._resolve",
