@@ -407,18 +407,23 @@ def _deal_recap_block(packet, best: dict) -> str:
 
 
 def _deal_message(packet, resolution) -> tuple:
-    """Returns (text, matched, bookable, savings_line). `matched`: a
-    room/rate was actually found at all. `bookable`: there's a genuine
-    offer worth confirming -- matched AND (not directly comparable to the
-    OTA price, or it's actually cheaper). A matched rate that ISN'T
-    cheaper gets a plain "nothing better to offer" reply with no
-    confirm/decline buttons -- there's nothing to confirm -- mirroring
-    wa_shared.whatsapp_reply()'s own gate (v2/v3 build their own message
-    text/structure here rather than reusing that function, but keep the
-    same underlying business logic). `savings_line` is a short standalone
-    sentence naming the actual amount saved, for the referral ask after a
-    confirm -- only set when there's a real comparable saving; None
-    otherwise (bookable-but-not-comparable, or no rate at all)."""
+    """Returns (text, matched, bookable, savings_line, confirm_line).
+    `matched`: a room/rate was actually found at all. `bookable`: there's
+    a genuine offer worth confirming -- matched AND (not directly
+    comparable to the OTA price, or it's actually cheaper). A matched
+    rate that ISN'T cheaper gets a plain "nothing better to offer" reply
+    with no confirm/decline buttons -- there's nothing to confirm --
+    mirroring wa_shared.whatsapp_reply()'s own gate (v2/v3 build their own
+    message text/structure here rather than reusing that function, but
+    keep the same underlying business logic). `savings_line` is a short
+    standalone sentence naming the actual amount saved, for the referral
+    ask after a confirm. `confirm_line` continues directly after
+    "Wonderful — " in the confirm message ("I've secured X for Y (Z less
+    than what you had)."), so the confirmation itself names what was
+    actually booked instead of a bare "I've noted this down." Both are
+    only set when there's a real offer; None otherwise (bookable-but-not-
+    comparable only sets confirm_line, not savings_line -- nothing to
+    compare against; no rate at all sets neither)."""
     import os
 
     rz = resolution or {}
@@ -434,7 +439,7 @@ def _deal_message(packet, resolution) -> tuple:
     if not best:
         name = packet.hotel.name or "this hotel"
         return (f"I wasn't able to find a better live rate for {name} at the moment. "
-                f"Happy to take a look at another property, if you'd like?"), False, False, None
+                f"Happy to take a look at another property, if you'd like?"), False, False, None, None
 
     ota_price = packet.ota_benchmark.final_payable
     ota_ccy = packet.ota_benchmark.currency
@@ -443,10 +448,11 @@ def _deal_message(packet, resolution) -> tuple:
     ccy = best.get("currency", "") or ""
     sell = round(best.get("total_price", 0) * (1 + pct / 100) + flat, 2)
     comparable = bool(ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
+    hotel_name = packet.hotel.name or "this hotel"
 
     if comparable and (ota_price - sell) < 0:
         return ("I checked, but the price you already have looks like the best "
-                 "deal for this stay — nothing better to offer right now."), True, False, None
+                 "deal for this stay — nothing better to offer right now."), True, False, None, None
 
     recap = _deal_recap_block(packet, best)
     savings_line = None
@@ -457,12 +463,15 @@ def _deal_message(packet, resolution) -> tuple:
         dpct = (diff / ota_price * 100) if ota_price else 0
         lines.append(_price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct))
         savings_line = f"You just saved {ccy} {diff:,.0f} ({dpct:.0f}%) on this one."
+        confirm_line = (f"I've secured {hotel_name} for {ccy} {sell:,.2f} "
+                         f"({ccy} {diff:,.0f} less than what you had).")
     else:
         lines[0] = "*Good news — I found you a rate.*"
         lines.append(_price_line(ccy, sell))
+        confirm_line = f"I've secured {hotel_name} for {ccy} {sell:,.2f}."
     lines.append("")
     lines.append("Shall I go ahead and secure this for you?")
-    return "\n".join(lines), True, True, savings_line
+    return "\n".join(lines), True, True, savings_line, confirm_line
 
 
 def _present_deal(frm: str, packet) -> None:
@@ -471,13 +480,13 @@ def _present_deal(frm: str, packet) -> None:
 
     wa_send(frm, random.choice(_FETCHING_PHRASES))
     resolution = _resolve(packet) if packet.hotel.name else None
-    text, matched, bookable, savings_line = _deal_message(packet, resolution)
+    text, matched, bookable, savings_line, confirm_line = _deal_message(packet, resolution)
 
     if bookable:
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS[frm] = {"state": "presented", "packet": packet,
                                   "resolution": resolution, "savings_line": savings_line,
-                                  "last_activity": time.time()}
+                                  "confirm_line": confirm_line, "last_activity": time.time()}
         whatsapp.send_buttons(frm, text, [("confirm_book", "Yes, book this"), ("decline_book", "Not now")])
     elif matched:
         wa_send(frm, text)   # a real rate, but not actually cheaper -- nothing to confirm
@@ -573,7 +582,8 @@ def _handle_presented(frm: str, session: dict, items: list, button_id) -> None:
                            referred_by=referred_by)
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS.pop(frm, None)
-        wa_send(frm, f"Wonderful — I've noted this down. Your reference is *{ref}*, "
+        confirm_line = session.get("confirm_line") or "I've noted this down."
+        wa_send(frm, f"Wonderful — {confirm_line} Your reference is *{ref}*, "
                      f"and I'll personally follow up shortly to finalize everything with you.")
         ask, shareable = _referral_share_messages(ref, session.get("savings_line"))
         wa_send(frm, ask)

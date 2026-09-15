@@ -82,10 +82,11 @@ def _open_awaiting(missing=("ota_benchmark.final_payable",), age_sec=0, attempts
     }
 
 
-def _open_presented(age_sec=0, resolution=None, savings_line=None):
+def _open_presented(age_sec=0, resolution=None, savings_line=None, confirm_line=None):
     v3._WA_SESSIONS["cust"] = {
         "state": "presented", "packet": _Packet(), "resolution": resolution or {},
-        "savings_line": savings_line, "last_activity": time.time() - age_sec,
+        "savings_line": savings_line, "confirm_line": confirm_line,
+        "last_activity": time.time() - age_sec,
     }
 
 
@@ -227,6 +228,30 @@ def test_confirm_button_records_lead_and_replies_with_reference(sent, monkeypatc
     assert recorded == [("cust", "confirmed")]
     assert "cust" not in v3._WA_SESSIONS
     assert any("BMS-TEST1234" in m[1] for m in sent if m[0] == "text")
+
+
+def test_confirm_message_names_what_was_actually_booked(sent, monkeypatch):
+    # The confirm note used to be a bare "I've noted this down" -- it
+    # should say what was actually secured and for how much, not just
+    # hand back a reference number.
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
+    monkeypatch.setattr("yta.leads.db.record_lead",
+                         lambda phone, status, packet, resolution, referred_by=None: "BMS-TEST5555")
+    _open_presented(confirm_line="I've secured Test Hotel for INR 28,015.64 (INR 3,667 less than what you had).")
+    v3.handle_batch("cust", [{"type": "button_reply", "button_id": "confirm_book", "text": "Yes, book this"}])
+    confirm_text = next(m[1] for m in sent if m[0] == "text" and "BMS-TEST5555" in m[1])
+    assert "I've secured Test Hotel for INR 28,015.64" in confirm_text
+    assert "3,667 less than what you had" in confirm_text
+
+
+def test_confirm_message_falls_back_gracefully_with_no_confirm_line(sent, monkeypatch):
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
+    monkeypatch.setattr("yta.leads.db.record_lead",
+                         lambda phone, status, packet, resolution, referred_by=None: "BMS-TEST6666")
+    _open_presented(confirm_line=None)
+    v3.handle_batch("cust", [{"type": "button_reply", "button_id": "confirm_book", "text": "Yes, book this"}])
+    confirm_text = next(m[1] for m in sent if m[0] == "text" and "BMS-TEST6666" in m[1])
+    assert "I've noted this down" in confirm_text
 
 
 def test_typed_yes_works_same_as_the_button(sent, monkeypatch):
