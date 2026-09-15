@@ -64,10 +64,13 @@ def verify_challenge(query: dict) -> str | None:
 
 def parse_inbound(payload: dict) -> list[dict]:
     """Meta's webhook POST body -> a flat list of
-    {from, type, text, media_id, mime_type} — one per message. `type` is
-    "text" or "image"/"document" (media messages, where `media_id` needs
-    `download_media()`); anything else (status updates, reactions, etc.)
-    is skipped."""
+    {from, type, text, media_id, mime_type, button_id} — one per message.
+    `type` is "text", "image"/"document" (media messages, where `media_id`
+    needs `download_media()`), or "button_reply" (a tap on a
+    send_buttons() message — `button_id` is the id we chose when sending
+    it, `text` carries the button's visible title so a caller can also
+    match on what the customer would have typed instead); anything else
+    (status updates, reactions, etc.) is skipped."""
     out = []
     for entry in payload.get("entry") or []:
         for change in entry.get("changes") or []:
@@ -75,7 +78,8 @@ def parse_inbound(payload: dict) -> list[dict]:
             for m in value.get("messages") or []:
                 mtype = m.get("type")
                 item = {"from": m.get("from"), "type": mtype,
-                        "text": None, "media_id": None, "mime_type": None}
+                        "text": None, "media_id": None, "mime_type": None,
+                        "button_id": None}
                 if mtype == "text":
                     item["text"] = (m.get("text") or {}).get("body", "")
                 elif mtype in ("image", "document"):
@@ -83,6 +87,14 @@ def parse_inbound(payload: dict) -> list[dict]:
                     item["media_id"] = media.get("id")
                     item["mime_type"] = media.get("mime_type")
                     item["text"] = media.get("caption")  # a link can ride along as a caption
+                elif mtype == "interactive":
+                    interactive = m.get("interactive") or {}
+                    if interactive.get("type") != "button_reply":
+                        continue                          # list replies etc. -- not sent yet
+                    br = interactive.get("button_reply") or {}
+                    item["type"] = "button_reply"
+                    item["button_id"] = br.get("id")
+                    item["text"] = br.get("title")
                 else:
                     continue                              # status update / reaction / etc.
                 out.append(item)
@@ -126,6 +138,37 @@ def send_text(to: str, body: str) -> dict:
         headers={"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json"},
         json={"messaging_product": "whatsapp", "to": to,
               "type": "text", "text": {"body": body, "preview_url": False}},
+        timeout=15,
+    )
+    try:
+        out = r.json()
+    except ValueError:
+        out = {"raw": r.text}
+    out["_status_code"] = r.status_code
+    return out
+
+
+def send_buttons(to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
+    """Interactive reply buttons — up to 3 tappable choices (Meta's own
+    limit; a 4th is silently rejected by the API, so callers should never
+    pass more). `buttons` is [(id, title), ...] — `id` comes straight back
+    on the customer's tap (parse_inbound()'s "button_id"), `title` is what
+    they see. A customer can still just type instead of tapping — this is
+    an additional affordance, not a replacement for reading plain text."""
+    import requests
+    cfg = _cfg()
+    r = requests.post(
+        f"{_GRAPH}/{cfg['api_version']}/{cfg['phone_number_id']}/messages",
+        headers={"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json"},
+        json={"messaging_product": "whatsapp", "to": to, "type": "interactive",
+              "interactive": {
+                  "type": "button",
+                  "body": {"text": body},
+                  "action": {"buttons": [
+                      {"type": "reply", "reply": {"id": bid, "title": title}}
+                      for bid, title in buttons[:3]
+                  ]},
+              }},
         timeout=15,
     )
     try:
