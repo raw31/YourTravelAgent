@@ -21,9 +21,11 @@ CREATE TABLE IF NOT EXISTS leads (
     price             REAL,               -- BookMyStay's confirmed sell price
     ota_price         REAL,               -- OTA's shown price, for reference
     occupancy_json    TEXT,               -- raw occupancy array, as JSON
+    referred_by       TEXT,               -- a prior booking_ref, if this lead mentioned one
 
     packet_json       TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS ix_leads_phone  ON leads(phone);
-CREATE INDEX IF NOT EXISTS ix_leads_status ON leads(status);
+CREATE INDEX IF NOT EXISTS ix_leads_phone       ON leads(phone);
+CREATE INDEX IF NOT EXISTS ix_leads_status      ON leads(status);
+CREATE INDEX IF NOT EXISTS ix_leads_referred_by ON leads(referred_by);

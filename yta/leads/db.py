@@ -28,6 +28,17 @@ def connect(path=None) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    # Migrate BEFORE running schema.sql, not after -- schema.sql's own
+    # CREATE INDEX on referred_by fails outright against a leads.db that
+    # predates that column, so the column has to exist first. Covers both
+    # "table exists but lacks the column" (OperationalError: duplicate
+    # column -- ignored) and "table doesn't exist yet at all"
+    # (OperationalError: no such table -- ignored, schema.sql below
+    # creates it fresh with the column already included).
+    try:
+        con.execute("ALTER TABLE leads ADD COLUMN referred_by TEXT")
+    except sqlite3.OperationalError:
+        pass
     con.executescript(SCHEMA.read_text())
     return con
 
@@ -50,9 +61,11 @@ def _best_option(resolution: dict | None) -> dict:
 
 
 def record_lead(phone: str, status: str, packet, resolution: dict | None,
-                 path=None) -> str:
+                 path=None, referred_by: str | None = None) -> str:
     """Write one row for a customer's confirm/decline on a presented deal.
-    Returns the generated booking reference ("BMS-XXXXXXXX")."""
+    Returns the generated booking reference ("BMS-XXXXXXXX"). `referred_by`
+    is a prior booking_ref, when this lead came in through another
+    customer's referral share."""
     assert status in ("confirmed", "declined"), status
     best = _best_option(resolution)
     ref = "BMS-" + uuid.uuid4().hex[:8].upper()
@@ -68,15 +81,15 @@ def record_lead(phone: str, status: str, packet, resolution: dict | None,
         con.execute(
             "INSERT INTO leads (booking_ref, phone, status, created_at, hotel_name, "
             "check_in, check_out, room_name, meal_plan, refundable, free_cancel_until, "
-            "currency, price, ota_price, occupancy_json, packet_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "currency, price, ota_price, occupancy_json, referred_by, packet_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ref, phone, status, datetime.now(timezone.utc).isoformat(),
              packet.hotel.name, packet.stay.check_in, packet.stay.check_out,
              best.get("room_name") or packet.requested_offer.room_name,
              best.get("meal_basis"), best.get("refundable"),
              best.get("free_cancel_until"), best.get("currency"),
              best.get("total_price"), packet.ota_benchmark.final_payable,
-             occ_json, json.dumps(packet.to_dict())),
+             occ_json, referred_by, json.dumps(packet.to_dict())),
         )
         con.commit()
     finally:
