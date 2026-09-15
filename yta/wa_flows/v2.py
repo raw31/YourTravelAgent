@@ -208,19 +208,21 @@ def _clean_room_name(name):
     return name
 
 
-def _price_rows_block(rows: list) -> str:
-    """WhatsApp renders in a proportional font -- hand-padding labels with
-    spaces (tried in an earlier version) does NOT line values up, it just
-    looks like broken, arbitrary whitespace. Real alignment needs
-    WhatsApp's own ```monospace``` block, with padding computed to that
-    fixed-width font. `rows` is [(label, value), ...]."""
-    if len(rows) == 1:
-        label, value = rows[0]
-        return f"{label}: {value}"
-    labels = [f"{label}:" for label, _ in rows]
-    width = max(len(l) for l in labels) + 2
-    lines = [labels[i].ljust(width) + rows[i][1] for i in range(len(rows))]
-    return "```\n" + "\n".join(lines) + "\n```"
+def _price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct) -> str:
+    """Two failed approaches taught the same lesson: don't try to align
+    price labels into columns at all. Hand-padded spaces don't align in
+    WhatsApp's proportional font; a ```monospace``` block DOES align, but
+    the padding needed to line up "BookMyStay price:" makes the line
+    wider than a phone screen, so WhatsApp wraps it mid-value ("INR" on
+    one line, the number on the next) -- worse than the original
+    misalignment. A "was -> now" line has nothing to align and is short
+    enough to never wrap."""
+    return (f"~{ota_ccy} {ota_price:,.0f}~ → *{ccy} {sell:,.2f}*\n"
+            f"You save *{ccy} {diff:,.0f}* ({dpct:.0f}%)")
+
+
+def _price_line(ccy, sell) -> str:
+    return f"BookMyStay price: *{ccy} {sell:,.2f}*"
 
 
 def _recap_block(packet) -> str:
@@ -373,14 +375,10 @@ def _deal_message(packet, resolution) -> tuple:
     if comparable:
         diff = ota_price - sell
         dpct = (diff / ota_price * 100) if ota_price else 0
-        lines.append(_price_rows_block([
-            ("Your price", f"{ota_ccy} {ota_price:,.0f}"),
-            ("BookMyStay price", f"{ccy} {sell:,.2f}"),
-            ("You save", f"{ccy} {diff:,.0f} ({dpct:.0f}%)"),
-        ]))
+        lines.append(_price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct))
     else:
         lines[0] = "*Good news — I found you a rate.*"
-        lines.append(_price_rows_block([("BookMyStay price", f"{ccy} {sell:,.2f}")]))
+        lines.append(_price_line(ccy, sell))
     lines.append("")
     lines.append("Shall I go ahead and secure this for you?")
     return "\n".join(lines), True, True

@@ -258,11 +258,15 @@ def test_unrecognized_reply_in_presented_state_reprompts_and_stays_open(sent, mo
 
 # -- the deal reveal: matched-and-cheaper / matched-not-cheaper / no rate --
 
-def test_price_rows_use_a_real_monospace_block_not_hand_padded_spaces(sent, monkeypatch):
-    # Regression: an earlier version hand-padded labels with literal spaces
-    # assuming a monospace font -- WhatsApp renders proportional text, so
-    # that padding didn't align anything, it just looked broken. Real
-    # alignment needs an actual ```monospace``` fence.
+def test_price_shown_as_short_wrap_safe_was_now_lines(sent, monkeypatch):
+    # Regression, round 2: hand-padded spaces don't align in WhatsApp's
+    # proportional font (round 1's bug); a ```monospace``` fence DOES
+    # align, but the padding needed for "BookMyStay price:" made lines
+    # wider than a phone screen, so WhatsApp wrapped mid-value ("INR" on
+    # one line, the number on the next) -- confirmed in live testing with
+    # a 6-figure Atlantis, The Palm price. No columns at all this time:
+    # short "was -> now" lines can't wrap badly because nothing needs to
+    # line up.
     monkeypatch.setattr(
         "yta.web._resolve",
         lambda packet: {"room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
@@ -271,8 +275,10 @@ def test_price_rows_use_a_real_monospace_block_not_hand_padded_spaces(sent, monk
     )
     v2._present_deal("cust", _Packet())
     body = next(m[1] for m in sent if m[0] == "buttons")
-    assert "```" in body
-    assert " " * 4 not in body.split("```")[0]   # no hand-padding outside the fenced block
+    assert "```" not in body
+    assert "  " not in body                       # no multi-space padding anywhere
+    assert all(len(line) < 45 for line in body.split("\n"))   # every line short enough not to wrap
+    assert "~INR 31,683~" in body and "*INR 28,015.64*" in body
 
 
 def test_shouty_and_stray_punctuation_room_names_get_cleaned_up(sent, monkeypatch):
