@@ -130,8 +130,9 @@ _READABLE_TYPES = ("text", "image", "document", "button_reply")
 
 _ONBOARDING_TEXT = (
     "I'm here to help you find a better rate on your stay. Send me the "
-    "hotel's booking link, or a screenshot showing the hotel, your dates, "
-    "room, and the price you were quoted, and I'll take it from there."
+    "hotel's booking link, or a screenshot taken after you've selected "
+    "your room — showing the hotel, dates, room type, and the total "
+    "price — and I'll take it from there."
 )
 
 # Rotated rather than fixed so the same customer never sees the exact
