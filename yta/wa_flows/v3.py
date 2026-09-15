@@ -261,33 +261,43 @@ def _price_line(ccy, sell) -> str:
     return f"BookMyStay price: *{ccy} {sell:,.2f}*"
 
 
-def _referral_share_message(booking_ref: str, savings_line: str | None = None) -> str:
-    """A single, self-contained block worth forwarding as-is -- WhatsApp's
-    own forward/share-to-Status actions work on ANY received message, so
-    the only thing worth building here is a message worth sharing. The
-    wa.me deep link pre-fills the referral mention for whoever taps it,
-    so the new person never has to type or remember a code themselves --
-    they just hit send on a message that already says who referred them.
-    `savings_line` (from _deal_message()) leads the ask when there's a
-    real figure to reference -- referencing actual money saved is the
-    whole reason this is asked right after confirming, not before."""
+def _referral_share_messages(booking_ref: str, savings_line: str | None = None) -> tuple:
+    """Returns (ask_text, shareable_text) as two SEPARATE messages, not
+    one -- WhatsApp's forward action grabs the whole message bubble, so
+    bundling instructions in with the shareable text would forward the
+    instructions too. The second message is nothing BUT the shareable
+    line, so "tap and hold, then Forward" on it forwards something clean.
+
+    There's no way for a business-sent message to trigger WhatsApp's own
+    Forward/Share-to-Status picker directly -- that's a long-press
+    gesture inside WhatsApp itself, not something the Cloud API exposes
+    to any app, ours included -- so the instruction has to be spelled out
+    rather than assumed. The wa.me deep link pre-fills the referral
+    mention for whoever taps it, so the new person never has to type or
+    remember a code themselves -- they just hit send on a message that
+    already says who referred them. `savings_line` (from _deal_message())
+    leads the ask when there's a real figure to reference -- referencing
+    actual money saved is the whole reason this is asked right after
+    confirming, not before."""
     import os
     from urllib.parse import quote
     lead_in = f"{savings_line} " if savings_line else ""
     number = os.environ.get("WHATSAPP_DISPLAY_NUMBER", "").strip()
     if not number:
         # No number configured to build a deep link from -- fall back to
-        # asking them to mention the code themselves rather than send
-        # nothing at all.
-        return (f"{lead_in}Know someone with a trip coming up? Send them my number and "
-                f"have them mention your reference *{booking_ref}* — "
-                f"I'll take good care of them too.")
+        # asking them to mention the code themselves, as one message.
+        ask = (f"{lead_in}If a friend's got a trip coming up, I'd love to help "
+               f"them too. Send them my number and have them mention your "
+               f"reference *{booking_ref}* — I'll take good care of them too.")
+        return ask, None
+
     prefill = quote(f"Hi, I was referred by {booking_ref}")
     link = f"https://wa.me/{number}?text={prefill}"
-    return (f"{lead_in}Know someone with a trip coming up? Forward this to their DM, "
-            "or post it to your Status:\n\n"
-            f'"I just found a better hotel rate through BookMyStay — '
-            f'check yours here: {link}"')
+    ask = (f"{lead_in}If a friend's got a trip coming up, I'd love to help "
+           f"them too. Tap and hold the next message, then choose "
+           f"*Forward* or *Share to Status*.")
+    shareable = f"I just found a better hotel rate through BookMyStay — check yours here: {link}"
+    return ask, shareable
 
 
 def _recap_block(packet) -> str:
@@ -565,7 +575,10 @@ def _handle_presented(frm: str, session: dict, items: list, button_id) -> None:
             _WA_SESSIONS.pop(frm, None)
         wa_send(frm, f"Wonderful — I've noted this down. Your reference is *{ref}*, "
                      f"and I'll personally follow up shortly to finalize everything with you.")
-        wa_send(frm, _referral_share_message(ref, session.get("savings_line")))
+        ask, shareable = _referral_share_messages(ref, session.get("savings_line"))
+        wa_send(frm, ask)
+        if shareable:
+            wa_send(frm, shareable)
         print(f"[wa v3] {frm} confirmed, lead {ref} (referred_by={referred_by})", flush=True)
         return
 

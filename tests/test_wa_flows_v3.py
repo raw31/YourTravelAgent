@@ -407,6 +407,23 @@ def test_confirming_asks_for_a_referral_with_the_real_savings_figure(sent, monke
     assert any("wa.me/" in t for t in texts)                             # a real forwardable deep link
 
 
+def test_the_forwardable_message_carries_nothing_but_the_shareable_text(sent, monkeypatch):
+    # WhatsApp's forward action grabs the whole message bubble -- if the
+    # "tap and hold, then Forward" instruction and the shareable text
+    # were bundled in one message, forwarding it would carry the
+    # instructions along too. They must be two separate sends.
+    monkeypatch.setenv("WHATSAPP_DISPLAY_NUMBER", "919999999999")
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
+    monkeypatch.setattr("yta.leads.db.record_lead",
+                         lambda phone, status, packet, resolution, referred_by=None: "BMS-TEST9999")
+    _open_presented(savings_line="You just saved INR 3,667 (12%) on this one.")
+    v3.handle_batch("cust", [{"type": "button_reply", "button_id": "confirm_book", "text": "Yes, book this"}])
+    texts = [m[1] for m in sent if m[0] == "text"]
+    shareable = next(t for t in texts if "wa.me/" in t)
+    assert "Forward" not in shareable and "Tap and hold" not in shareable
+    assert shareable.startswith("I just found a better hotel rate")
+
+
 def test_referral_ask_falls_back_to_generic_when_no_savings_figure(sent, monkeypatch):
     # bookable-but-not-comparable case: there's an offer, just nothing to
     # compute a specific savings percentage against.
