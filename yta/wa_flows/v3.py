@@ -261,7 +261,7 @@ def _price_line(ccy, sell) -> str:
     return f"BookMyStay price: *{ccy} {sell:,.2f}*"
 
 
-def _referral_share_messages(booking_ref: str, savings_line: str | None = None) -> tuple:
+def _referral_share_messages(booking_ref: str) -> tuple:
     """Returns (ask_text, shareable_text) as two SEPARATE messages, not
     one -- WhatsApp's forward action grabs the whole message bubble, so
     bundling instructions in with the shareable text would forward the
@@ -275,27 +275,29 @@ def _referral_share_messages(booking_ref: str, savings_line: str | None = None) 
     rather than assumed. The wa.me deep link pre-fills the referral
     mention for whoever taps it, so the new person never has to type or
     remember a code themselves -- they just hit send on a message that
-    already says who referred them. `savings_line` (from _deal_message())
-    leads the ask when there's a real figure to reference -- referencing
-    actual money saved is the whole reason this is asked right after
-    confirming, not before."""
+    already says who referred them.
+
+    Deliberately does NOT restate the savings figure -- the confirm
+    message sent right before this already says "I've secured X for Y
+    (Z less than what you had)" (see _deal_message()'s confirm_line), so
+    repeating "you just saved Z" here read like the bot forgot what it
+    just said one message earlier."""
     import os
     from urllib.parse import quote
-    lead_in = f"{savings_line} " if savings_line else ""
     number = os.environ.get("WHATSAPP_DISPLAY_NUMBER", "").strip()
     if not number:
         # No number configured to build a deep link from -- fall back to
         # asking them to mention the code themselves, as one message.
-        ask = (f"{lead_in}If a friend's got a trip coming up, I'd love to help "
+        ask = (f"If a friend's got a trip coming up, I'd love to help "
                f"them too. Send them my number and have them mention your "
                f"reference *{booking_ref}* — I'll take good care of them too.")
         return ask, None
 
     prefill = quote(f"Hi, I was referred by {booking_ref}")
     link = f"https://wa.me/{number}?text={prefill}"
-    ask = (f"{lead_in}If a friend's got a trip coming up, I'd love to help "
-           f"them too. Tap and hold the next message, then choose "
-           f"*Forward* or *Share to Status*.")
+    ask = ("If a friend's got a trip coming up, I'd love to help "
+           "them too. Tap and hold the next message, then choose "
+           "*Forward* or *Share to Status*.")
     shareable = f"I just found a better hotel rate through BookMyStay — check yours here: {link}"
     return ask, shareable
 
@@ -585,7 +587,7 @@ def _handle_presented(frm: str, session: dict, items: list, button_id) -> None:
         confirm_line = session.get("confirm_line") or "I've noted this down."
         wa_send(frm, f"Wonderful — {confirm_line} Your reference is *{ref}*, "
                      f"and I'll personally follow up shortly to finalize everything with you.")
-        ask, shareable = _referral_share_messages(ref, session.get("savings_line"))
+        ask, shareable = _referral_share_messages(ref)
         wa_send(frm, ask)
         if shareable:
             wa_send(frm, shareable)

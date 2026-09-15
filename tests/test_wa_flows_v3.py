@@ -419,16 +419,34 @@ def test_missing_field_ask_carries_a_start_new_chat_button(sent, monkeypatch):
 
 # -- the referral loop: new in v3, not in v2 ------------------------------
 
-def test_confirming_asks_for_a_referral_with_the_real_savings_figure(sent, monkeypatch):
+def test_confirming_asks_for_a_referral_and_a_deep_link(sent, monkeypatch):
     monkeypatch.setenv("WHATSAPP_DISPLAY_NUMBER", "919999999999")
     monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
     monkeypatch.setattr("yta.leads.db.record_lead",
                          lambda phone, status, packet, resolution, referred_by=None: "BMS-TEST1234")
-    _open_presented(savings_line="You just saved INR 3,667 (12%) on this one.")
+    _open_presented(confirm_line="I've secured Test Hotel for INR 28,015.64 (INR 3,667 less than what you had).")
     v3.handle_batch("cust", [{"type": "button_reply", "button_id": "confirm_book", "text": "Yes, book this"}])
     texts = [m[1] for m in sent if m[0] == "text"]
     assert any("BMS-TEST1234" in t for t in texts)                       # the confirm note
-    assert any("You just saved INR 3,667 (12%)" in t for t in texts)     # the real figure, not a template
+    assert any("wa.me/" in t for t in texts)                             # a real forwardable deep link
+
+
+def test_savings_figure_is_not_repeated_in_the_referral_ask(sent, monkeypatch):
+    # Regression: the confirm message (message 1) already states the
+    # savings via confirm_line -- the referral ask (message 2) used to
+    # restate "you just saved X" immediately after, reading like the bot
+    # forgot what it had just said one message earlier.
+    monkeypatch.setenv("WHATSAPP_DISPLAY_NUMBER", "919999999999")
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
+    monkeypatch.setattr("yta.leads.db.record_lead",
+                         lambda phone, status, packet, resolution, referred_by=None: "BMS-TEST7777")
+    _open_presented(confirm_line="I've secured Test Hotel for INR 28,015.64 (INR 3,667 less than what you had).")
+    v3.handle_batch("cust", [{"type": "button_reply", "button_id": "confirm_book", "text": "Yes, book this"}])
+    texts = [m[1] for m in sent if m[0] == "text"]
+    confirm_text = next(t for t in texts if "BMS-TEST7777" in t)
+    ask_text = next(t for t in texts if "trip coming up" in t.lower())
+    assert "3,667" in confirm_text          # the figure lives in the confirm message...
+    assert "3,667" not in ask_text          # ...and isn't repeated in the ask right after it
     assert any("wa.me/" in t for t in texts)                             # a real forwardable deep link
 
 
@@ -447,19 +465,6 @@ def test_the_forwardable_message_carries_nothing_but_the_shareable_text(sent, mo
     shareable = next(t for t in texts if "wa.me/" in t)
     assert "Forward" not in shareable and "Tap and hold" not in shareable
     assert shareable.startswith("I just found a better hotel rate")
-
-
-def test_referral_ask_falls_back_to_generic_when_no_savings_figure(sent, monkeypatch):
-    # bookable-but-not-comparable case: there's an offer, just nothing to
-    # compute a specific savings percentage against.
-    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
-    monkeypatch.setattr("yta.leads.db.record_lead",
-                         lambda phone, status, packet, resolution, referred_by=None: "BMS-TEST0001")
-    _open_presented(savings_line=None)
-    v3.handle_batch("cust", [{"type": "button_reply", "button_id": "confirm_book", "text": "Yes, book this"}])
-    texts = [m[1] for m in sent if m[0] == "text"]
-    assert any("trip coming up" in t.lower() for t in texts)   # still asks
-    assert not any("you just saved" in t.lower() for t in texts)   # but no fabricated figure
 
 
 def test_decline_does_not_ask_for_a_referral(sent, monkeypatch):
