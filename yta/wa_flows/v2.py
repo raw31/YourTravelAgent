@@ -1,5 +1,4 @@
-"""v2 — the full conversation: onboarding, bounded slot-filling, a real
-confirm/decline step, and a lead recorded for a human to call.
+"""v2 — the full conversation: a concierge, not a form.
 
 Starts from v1's intent routing (cancel handled in any state, unsupported
 content gets a real reply, a fresh link mid-clarification is treated as
@@ -7,55 +6,68 @@ switching hotels) — v1.py itself is untouched; this is a separate module
 with its own session store so v0 and v1 keep working exactly as they do
 today regardless of which flow is active.
 
-What v2 adds on top:
+What v2 adds on top of v1's routing, arrived at over several rounds of
+live testing and review:
 
-  1. Onboarding copy — the "I don't understand" fallback actually teaches
-     the customer what to send (hotel name/dates/room/price visible in
-     the screenshot), instead of a bare one-liner.
-  2. A hard cap on unproductive clarification rounds (_MAX_UNPRODUCTIVE_
-     ATTEMPTS) instead of a wall-clock session timeout. v1 (and v2's own
-     first cut) expired a session after N minutes of silence — live
-     testing proved that wrong twice over: a customer who takes 6, 15, or
-     24 minutes to go find the right screenshot is still answering the
-     SAME question, not starting a new conversation, and a clock can't
-     tell those apart. Content can: an incoming reply with no URL is
-     always tried against the open question first via
-     extract_clarification(), no matter how much time has passed: a
-     price screenshot from an hour ago still answers "what's the price."
-     Only replies that genuinely don't answer anything (checked by
-     content, not by a timer) count against the 2-attempt cap before the
-     bot gives up — see the standard "bounded fallback, then handoff"
-     pattern this follows.
-  3. A PRESENTED state — once a deal is actually quoted, v1 just stops.
-     v2 asks the customer to confirm (WhatsApp reply buttons, since the
-     Cloud API doesn't support free-text input on a button — only
-     predefined tap-replies) and, on confirmation, records a lead
-     (yta.leads.db.record_lead) so a human can call and close the booking.
-  4. Buttons at every choice point, not just confirm/decline — a
-     "Start new chat" button rides along with the missing-field ask and
-     the "no live rate" reply, so the customer always has a visible way
-     back to the start instead of needing to know to type "cancel".
+  1. Bounded slot-filling instead of a wall-clock timeout
+     (_MAX_UNPRODUCTIVE_ATTEMPTS). Live testing proved a session timeout
+     wrong twice over — a customer taking 6, 15, or 60 minutes to find
+     the right screenshot is still answering the SAME question, not
+     starting a new one, and a clock can't tell those apart; content
+     can. A reply with no URL is always tried against the open question
+     first via extract_clarification(), no matter how much time has
+     passed. Only replies that genuinely don't answer anything count
+     against the 2-attempt cap before the bot gives up.
+  2. A PRESENTED state with a real confirm/decline step — v1 just stops
+     once a deal is quoted. v2 asks (WhatsApp reply buttons — the Cloud
+     API doesn't support free-text input on a button, only predefined
+     tap-replies) and records a lead (yta.leads.db.record_lead) either
+     way, so a human has a queue to call from.
+  3. The conversation itself was redesigned around a premium-concierge
+     register, not a bot filling a form:
+       - Never calls itself a "checker" or a tool.
+       - Facts you'd actually need to verify — dates, room, the numbers
+         — stay in a clean labeled block; the concierge voice is the
+         sentence that opens it and the question that closes it, never
+         a replacement for the block itself (a version that dissolved
+         the facts into pure prose was tried and rejected — harder to
+         scan even though it read warmer).
+       - Every mandatory field gets a real question a person would
+         actually ask (_NATURAL_QUESTIONS), not its internal field
+         label recited back ("Total Price Shown on the Page").
+       - Acknowledgment phrasing rotates across a small set of genuine
+         alternatives (_CHECKING_PHRASES / _FETCHING_PHRASES) instead of
+         repeating the exact same line to the same customer every time.
+       - A button rides on the SAME message as the text it belongs to
+         (the deal/ask becomes the button message's own body) rather
+         than trailing in as a separate bubble.
+  4. Buttons attached at every real choice point: "Start over" on the
+     missing-field ask, "Yes, book this" / "Not now" on a genuine offer,
+     "Try another hotel" when there's no live rate at all. Crucially,
+     confirm/decline buttons only appear when there's actually something
+     worth confirming — a matched rate that ISN'T cheaper than what the
+     customer already has gets a plain "nothing better to offer" reply
+     with no buttons, same as v0/v1's underlying logic; only "matched AND
+     (cheaper OR not comparable)" counts as a real offer.
 
 A session is only ever dropped by: CANCEL (explicit or a fresh URL,
 treated as an implicit "different hotel"), the unproductive-attempt cap,
 a confirm/decline in PRESENTED, or an error. There's still a very long
 (_SESSION_MAX_AGE_SEC) backstop, but that's pure memory hygiene for a
-number that genuinely never comes back — not a UX gate, and long enough
-that no real reply should ever hit it.
+number that genuinely never comes back — not a UX gate.
 
-Every path below ends at one of: COMPLETED handled via CONFIRMED/DECLINED,
-CANCELLED, GAVE_UP, or ERROR — all of which clear _WA_SESSIONS[frm].
 Session dict shape: {"state": "awaiting_field" | "presented", "packet",
 "missing"?, "clarify_text"?, "unproductive_attempts"?, "resolution"?,
 "last_activity"}.
 """
 from __future__ import annotations
 
+import random
 import re
 import threading
 import time
 
-from yta.wa_shared import ask_for_missing, extracted_lines, wa_send, whatsapp_reply
+from yta.wa_shared import occ_repr, wa_send
 
 _WA_SESSIONS: dict = {}
 _WA_SESSIONS_LOCK = threading.Lock()
@@ -81,10 +93,54 @@ _DECLINE_RE = re.compile(r"\b(no|not now|skip|later|maybe later)\b", re.IGNORECA
 _READABLE_TYPES = ("text", "image", "document", "button_reply")
 
 _ONBOARDING_TEXT = (
-    "Send me the hotel's booking link, or a screenshot that clearly shows "
-    "the hotel name, your dates, room type, and the total price — and "
-    "I'll check if there's a better rate."
+    "I'm here to help you find a better rate on your stay. Send me the "
+    "hotel's booking link, or a screenshot showing the hotel, your dates, "
+    "room, and the price you were quoted, and I'll take it from there."
 )
+
+# Rotated rather than fixed so the same customer never sees the exact
+# same script twice in a row -- one of the concrete things that made the
+# old version read as a bot no matter how the individual words changed.
+_CHECKING_PHRASES = [
+    "Let me take a look for you.",
+    "One moment, I'll check this now.",
+    "Leave this with me for a moment.",
+]
+_FETCHING_PHRASES = [
+    "One moment, I'll get you the best rate I can find.",
+    "Let me check what I can secure for you.",
+    "Give me just a moment to pull the best rate.",
+]
+_FOUND_OPENERS = [
+    "Here's what I have for your stay — just need a bit more to compare it properly.",
+    "Almost there — just need a little more to compare this properly.",
+    "Just about set — one more thing and I can compare this properly.",
+]
+
+# A real question a person would ask, not the internal field label recited
+# back ("Total Price Shown on the Page") -- see extract_llm.FIELD_LABELS
+# for the label form this deliberately avoids using here.
+_NATURAL_QUESTIONS = {
+    "hotel.name": "Which hotel is this?",
+    "stay.check_in": "What are your check-in and check-out dates?",
+    "stay.check_out": "What are your check-in and check-out dates?",
+    "stay.rooms": "How many rooms, and how many guests in each?",
+    "stay.occupancy": "How many rooms, and how many guests in each?",
+    "requested_offer.room_name": "What room type did you pick?",
+    "ota_benchmark.final_payable": "What's the total price shown on the page?",
+}
+# Short noun phrases for weaving several missing fields into one sentence
+# ("I still need the room type and the total price...") rather than a
+# bulleted "Missing:" dump.
+_NATURAL_NOUNS = {
+    "hotel.name": "the hotel",
+    "stay.check_in": "your dates",
+    "stay.check_out": "your dates",
+    "stay.rooms": "how many guests",
+    "stay.occupancy": "how many guests",
+    "requested_offer.room_name": "the room type",
+    "ota_benchmark.final_payable": "the total price",
+}
 
 
 def _text_of(items: list) -> str:
@@ -129,57 +185,185 @@ def _download_media(items: list):
     return load_uploads(media_items) if media_items else None
 
 
-def _send_start_new_chat_button(frm: str, body: str) -> None:
-    from yta import whatsapp
-    whatsapp.send_buttons(frm, body, [("start_new_chat", "Start new chat")])
+def _short_date(iso_str):
+    from datetime import date
+    try:
+        y, m, d = (int(x) for x in iso_str.split("-"))
+        return date(y, m, d).strftime("%b %-d")
+    except Exception:
+        return iso_str
+
+
+def _recap_block(packet) -> str:
+    """The facts a customer would actually want to verify, as a clean
+    labeled block -- kept structured on purpose even though the messages
+    around it are conversational. See the module docstring: dissolving
+    this into prose was tried and rejected as harder to scan."""
+    lines = []
+    if packet.hotel.name:
+        lines.append(f"*{packet.hotel.name}*")
+    date_occ = []
+    if packet.stay.check_in and packet.stay.check_out:
+        date_occ.append(f"{_short_date(packet.stay.check_in)} → {_short_date(packet.stay.check_out)}")
+    if packet.stay.occupancy:
+        date_occ.append(occ_repr(packet.stay.occupancy))
+    if date_occ:
+        lines.append(" · ".join(date_occ))
+    room_bits = []
+    if packet.requested_offer.room_name:
+        room_bits.append(packet.requested_offer.room_name)
+    if packet.requested_offer.meal_plan:
+        room_bits.append(packet.requested_offer.meal_plan)
+    if packet.requested_offer.refundable is True:
+        room_bits.append("Refundable")
+    elif packet.requested_offer.refundable is False:
+        room_bits.append("Non-refundable")
+    if room_bits:
+        lines.append(" · ".join(room_bits))
+    return "\n".join(lines)
+
+
+def _closing_question(missing: list, clarify: str | None = None) -> str:
+    if clarify:
+        return clarify
+    if len(missing) == 1:
+        return _NATURAL_QUESTIONS.get(missing[0], "Could you share a bit more detail?")
+    nouns = []
+    for m in missing:
+        n = _NATURAL_NOUNS.get(m)
+        if n and n not in nouns:
+            nouns.append(n)
+    if not nouns:
+        return "Could you share a bit more detail, or send a fuller screenshot?"
+    if len(nouns) == 1:
+        joined = nouns[0]
+    elif len(nouns) == 2:
+        joined = f"{nouns[0]} and {nouns[1]}"
+    else:
+        joined = ", ".join(nouns[:-1]) + f", and {nouns[-1]}"
+    return f"I still need {joined} to finish comparing — send those, or a fuller screenshot?"
+
+
+def _found_and_ask_message(packet, missing: list, clarify: str | None = None) -> str:
+    question = _closing_question(missing, clarify)
+    recap = _recap_block(packet)
+    if not recap:
+        return f"I wasn't able to pick up much from that screenshot — {question}"
+    return f"{random.choice(_FOUND_OPENERS)}\n\n{recap}\n\n{question}"
+
+
+def _deal_message(packet, resolution) -> tuple:
+    """Returns (text, matched, bookable). `matched`: a room/rate was
+    actually found at all. `bookable`: there's a genuine offer worth
+    confirming -- matched AND (not directly comparable to the OTA price,
+    or it's actually cheaper). A matched rate that ISN'T cheaper gets a
+    plain "nothing better to offer" reply with no confirm/decline buttons
+    -- there's nothing to confirm -- mirroring wa_shared.whatsapp_reply()'s
+    own gate (v2 builds its own message text/structure here rather than
+    reusing that function, but keeps the same underlying business logic)."""
+    import os
+
+    rz = resolution or {}
+    room_map = rz.get("room_map") or {}
+    best = None
+    if room_map.get("matched"):
+        opts = room_map.get("rate_options") or []
+        keyed = set(room_map.get("ratekey_option_ids") or [])
+        pool = [o for o in opts if o.get("option_id") in keyed] or opts
+        if pool:
+            best = min(pool, key=lambda o: o.get("total_price", float("inf")))
+
+    if not best:
+        name = packet.hotel.name or "this hotel"
+        return (f"I wasn't able to find a better live rate for {name} at the moment. "
+                f"Happy to take a look at another property, if you'd like?"), False, False
+
+    ota_price = packet.ota_benchmark.final_payable
+    ota_ccy = packet.ota_benchmark.currency
+    pct = float(os.environ.get("WHATSAPP_MARKUP_PCT", "0") or 0)
+    flat = float(os.environ.get("WHATSAPP_MARKUP_FLAT", "0") or 0)
+    ccy = best.get("currency", "") or ""
+    sell = round(best.get("total_price", 0) * (1 + pct / 100) + flat, 2)
+    comparable = bool(ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
+
+    if comparable and (ota_price - sell) < 0:
+        return ("I checked, but the price you already have looks like the best "
+                 "deal for this stay — nothing better to offer right now."), True, False
+
+    header_bits = [packet.hotel.name or "this hotel"]
+    if best.get("room_name"):
+        header_bits.append(best["room_name"])
+    header = " · ".join(header_bits)
+
+    amenity_bits = []
+    if best.get("meal_basis"):
+        amenity_bits.append(best["meal_basis"])
+    if best.get("refundable") is True:
+        amenity_bits.append("Refundable")
+    elif best.get("refundable") is False:
+        amenity_bits.append("Non-refundable")
+    amenities = " · ".join(amenity_bits)
+
+    lines = ["*Good news — I found you a better rate.*", "", header]
+    if comparable:
+        diff = ota_price - sell
+        dpct = (diff / ota_price * 100) if ota_price else 0
+        lines.append(f"Your price:{' ' * 8}{ota_ccy} {ota_price:,.0f}")
+        lines.append(f"BookMyStay price:{' ' * 3}{ccy} {sell:,.2f}")
+        lines.append(f"You save:{' ' * 6}{ccy} {diff:,.0f} ({dpct:.0f}%)")
+    else:
+        lines[0] = "*Good news — I found you a rate.*"
+        lines.append(f"BookMyStay price: {ccy} {sell:,.2f}")
+    if amenities:
+        lines.append(amenities)
+    lines.append("")
+    lines.append("Shall I go ahead and secure this for you?")
+    return "\n".join(lines), True, True
 
 
 def _present_deal(frm: str, packet) -> None:
-    """Replaces wa_shared.finish_and_reply() for v2 only, so the choice of
-    follow-up buttons can depend on whether a live rate was actually
-    found — wa_shared.py itself is untouched (whatsapp_reply() is reused
-    as-is; it's pure formatting)."""
     from yta import whatsapp
     from yta.web import _resolve   # lazy, same reason wa_shared.finish_and_reply does this
 
-    wa_send(frm, "Fetching the discounted rates for you.")
+    wa_send(frm, random.choice(_FETCHING_PHRASES))
     resolution = _resolve(packet) if packet.hotel.name else None
-    reply = whatsapp_reply(packet, resolution)
-    wa_send(frm, reply)
+    text, matched, bookable = _deal_message(packet, resolution)
 
-    matched = bool((resolution or {}).get("room_map", {}).get("matched"))
-    if matched:
+    if bookable:
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS[frm] = {"state": "presented", "packet": packet,
                                   "resolution": resolution, "last_activity": time.time()}
-        whatsapp.send_buttons(frm, "Want to go ahead with this one?",
-                               [("confirm_book", "Yes, book this"), ("decline_book", "Not now")])
+        whatsapp.send_buttons(frm, text, [("confirm_book", "Yes, book this"), ("decline_book", "Not now")])
+    elif matched:
+        wa_send(frm, text)   # a real rate, but not actually cheaper -- nothing to confirm
     else:
-        whatsapp.send_buttons(frm, "No live rate on this one right now.",
-                               [("try_another", "Try another hotel")])
-    print(f"[wa v2] batch for {frm} complete (matched={matched})", flush=True)
+        whatsapp.send_buttons(frm, text, [("try_another", "Try another hotel")])
+    print(f"[wa v2] batch for {frm} complete (matched={matched} bookable={bookable})", flush=True)
 
 
 def _run_extraction(frm: str, url, media) -> None:
+    from yta import whatsapp
     from yta.pipeline import extract
-    wa_send(frm, "Checking your deal")
+
+    wa_send(frm, random.choice(_CHECKING_PHRASES))
     print(f"[wa v2] extracting: url={url!r} has_media={bool(media)}", flush=True)
     packet = extract(url or "", render=bool(url), media=media, log_sink=[])
     print(f"[wa v2] extraction done: hotel={packet.hotel.name!r} status={packet.status}", flush=True)
-    wa_send(frm, "\n".join(["Your deal:", "----"] + extracted_lines(packet)))
+
     missing = packet.missing_mandatory or packet.check_mandatory()
     if missing:
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS[frm] = {"state": "awaiting_field", "packet": packet, "missing": missing,
                                   "unproductive_attempts": 0, "last_activity": time.time()}
-        ask_for_missing(frm, missing)
-        _send_start_new_chat_button(frm, "Or, if you'd rather start over:")
+        whatsapp.send_buttons(frm, _found_and_ask_message(packet, missing),
+                               [("start_new_chat", "Start over")])
         return
     _present_deal(frm, packet)
 
 
 def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
-    from yta.extract_llm import FIELD_LABELS, extract_clarification
+    from yta import whatsapp
+    from yta.extract_llm import extract_clarification
     from yta.schema import LLM
 
     text = _text_of(items)
@@ -195,17 +379,16 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
             print(f"[wa v2] {frm} gave up after {attempts} unproductive replies", flush=True)
             with _WA_SESSIONS_LOCK:
                 _WA_SESSIONS.pop(frm, None)
-            wa_send(frm, "I wasn't able to get the full details for this one after a "
-                         "couple of tries — send a fresh link or screenshot whenever "
-                         "you're ready, no rush.")
+            wa_send(frm, "I wasn't able to pull together everything I need for this one "
+                         "just yet — whenever it's convenient, send a fresh link or photo "
+                         "and we'll pick up from there.")
             return
-        label = FIELD_LABELS.get(session["missing"][0], "a few more details")
-        wa_send(frm, f"I still need {label} to finish checking your deal — "
-                     f"or send \"cancel\" to check a different hotel instead.")
+        question = _closing_question(session["missing"])
         with _WA_SESSIONS_LOCK:
             session["last_activity"] = time.time()
             session["unproductive_attempts"] = attempts
             _WA_SESSIONS[frm] = session
+        whatsapp.send_buttons(frm, question, [("start_new_chat", "Start over")])
         return
 
     packet = session["packet"]
@@ -219,7 +402,8 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
             _WA_SESSIONS[frm] = {"state": "awaiting_field", "packet": packet, "missing": still_missing,
                                   "clarify_text": accumulated, "unproductive_attempts": 0,
                                   "last_activity": time.time()}
-        ask_for_missing(frm, still_missing, clarify)
+        whatsapp.send_buttons(frm, _found_and_ask_message(packet, still_missing, clarify),
+                               [("start_new_chat", "Start over")])
         return
 
     with _WA_SESSIONS_LOCK:
@@ -238,8 +422,8 @@ def _handle_presented(frm: str, session: dict, items: list, button_id) -> None:
         ref = record_lead(frm, "confirmed", session["packet"], session.get("resolution"))
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS.pop(frm, None)
-        wa_send(frm, f"Booked! Your reference is *{ref}* — our team will call you "
-                     f"shortly to confirm and complete the booking.")
+        wa_send(frm, f"Wonderful — I've noted this down. Your reference is *{ref}*, "
+                     f"and I'll personally follow up shortly to finalize everything with you.")
         print(f"[wa v2] {frm} confirmed, lead {ref}", flush=True)
         return
 
@@ -247,13 +431,12 @@ def _handle_presented(frm: str, session: dict, items: list, button_id) -> None:
         ref = record_lead(frm, "declined", session["packet"], session.get("resolution"))
         with _WA_SESSIONS_LOCK:
             _WA_SESSIONS.pop(frm, None)
-        wa_send(frm, "No problem — send me another hotel's link or a screenshot "
-                     "whenever you're ready.")
+        wa_send(frm, "Of course — whenever you're ready with the next one, I'm here to help.")
         print(f"[wa v2] {frm} declined, lead {ref}", flush=True)
         return
 
-    wa_send(frm, "Tap \"Yes, book this\" to confirm or \"Not now\" to skip — "
-                 "or just type it if the buttons aren't showing.")
+    wa_send(frm, "Just let me know — tap \"Yes, book this\" to confirm, or \"Not now\" to "
+                 "skip. Typing works too, if the buttons aren't showing.")
     with _WA_SESSIONS_LOCK:
         session["last_activity"] = time.time()
         _WA_SESSIONS[frm] = session
@@ -278,8 +461,8 @@ def handle_batch(frm: str, items: list) -> None:
 
         if not text and not url and not has_media and button_id is None:
             if _all_unreadable(items):
-                wa_send(frm, "I can only read text or a hotel link/screenshot right now — "
-                             "send one of those and I'll take it from there.")
+                wa_send(frm, "I'm only able to read text or a photo at the moment — a link "
+                             "or a screenshot would be perfect, and I'll take it from there.")
             else:
                 wa_send(frm, _ONBOARDING_TEXT)
             return
@@ -290,10 +473,10 @@ def handle_batch(frm: str, items: list) -> None:
             if session is not None:
                 with _WA_SESSIONS_LOCK:
                     _WA_SESSIONS.pop(frm, None)
-                wa_send(frm, "No problem — send me the hotel's link or a screenshot whenever you're ready.")
+                wa_send(frm, "Not a problem at all — send over the next one whenever you're ready.")
             else:
-                wa_send(frm, "Nothing to cancel yet — send me a hotel link or a screenshot "
-                             "and I'll check the best price for it.")
+                wa_send(frm, "There's nothing to cancel just yet — send me a hotel's link "
+                             "or screenshot whenever you're ready.")
             return
 
         if button_id == "try_another":
