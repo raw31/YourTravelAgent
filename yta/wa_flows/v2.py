@@ -45,7 +45,15 @@ from yta.wa_shared import ask_for_missing, extracted_lines, wa_send, whatsapp_re
 
 _WA_SESSIONS: dict = {}
 _WA_SESSIONS_LOCK = threading.Lock()
-_SESSION_TIMEOUT_SEC = 5 * 60
+# 5 minutes (v1's original value) turned out too short in live testing: a
+# customer asked for the price screenshot needs time to switch apps, find
+# the checkout page, and screenshot it -- a genuine reply arriving just
+# over 5 minutes late was expiring the session and silently discarding
+# the hotel name/dates/occupancy already captured, forcing a restart from
+# a bare price with no context. 15 minutes comfortably covers that without
+# meaningfully weakening the point of a timeout (a customer who's truly
+# moved on to something else).
+_SESSION_TIMEOUT_SEC = 15 * 60
 _MAX_UNPRODUCTIVE_ATTEMPTS = 2   # "after two fallback attempts, suggest human assistance"
 
 _CANCEL_RE = re.compile(

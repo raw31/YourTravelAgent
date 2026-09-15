@@ -95,6 +95,32 @@ def test_onboarding_message_names_what_to_send(sent):
                for m in sent if m[0] == "text")
 
 
+# -- session timeout ----------------------------------------------------
+
+def test_reply_a_bit_over_five_minutes_late_is_still_honored(sent, monkeypatch):
+    # Regression: live testing showed a customer taking just over 5 minutes
+    # to find the right screenshot got their session silently expired and
+    # lost all previously-captured hotel/dates/occupancy context. 15
+    # minutes should comfortably cover that.
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
+    monkeypatch.setattr("yta.extract_llm.extract_clarification",
+                         lambda missing, text, media=None: ({"ota_benchmark.final_payable": 31683}, None))
+    monkeypatch.setattr("yta.web._resolve", lambda packet: {"room_map": {"matched": False}})
+    _open_awaiting(age_sec=6 * 60)   # older than v1's old 5-minute cap, well under v2's 15
+    v2.handle_batch("cust", [{"type": "text", "text": "31683"}])
+    assert sent[-1][0] == "buttons"   # reached _present_deal, not re-treated as a fresh submission
+
+
+def test_reply_after_fifteen_minutes_does_expire(sent, monkeypatch):
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: None)
+    _open_awaiting(age_sec=16 * 60)
+    v2.handle_batch("cust", [{"type": "text", "text": "31683"}])
+    assert "cust" not in v2._WA_SESSIONS
+    # a bare number with no hotel context left should ask for the link/photo,
+    # not be silently absorbed as an answer to the (now-expired) question
+    assert any("hotel name" in m[1].lower() for m in sent if m[0] == "text")
+
+
 # -- bounded slot-filling ----------------------------------------------
 
 def test_gives_up_after_max_unproductive_attempts(sent, monkeypatch):
