@@ -126,6 +126,27 @@ def test_multiple_missing_fields_read_as_one_sentence_not_bullets(sent, monkeypa
     assert "the room type" in body and "the total price" in body
 
 
+def test_recap_shown_even_when_nothing_is_missing_on_first_submission(sent, monkeypatch):
+    # A screenshot that already has everything shouldn't skip straight to
+    # the price quote -- the customer should still see what was actually
+    # read, same transparency as the ask-for-more path gets.
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://booking.com/x")
+    monkeypatch.setattr("yta.pipeline.extract", lambda *a, **kw: _Packet(missing=[]))
+    monkeypatch.setattr("yta.web._resolve", lambda packet: {"room_map": {"matched": False}})
+    v2.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x"}])
+    recap_msgs = [m[1] for m in sent if m[0] == "text" and "Test Hotel" in m[1]]
+    assert recap_msgs, "expected a recap message showing what was read"
+
+
+def test_recap_includes_ota_price_when_already_known(sent, monkeypatch):
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://booking.com/x")
+    monkeypatch.setattr("yta.pipeline.extract",
+                         lambda *a, **kw: _Packet(missing=["requested_offer.room_name"]))
+    v2.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x"}])
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "31,683" in body   # the OTA price the packet already had is shown in the recap
+
+
 # -- no wall-clock timeout on a real reply -------------------------------
 
 def test_a_late_reply_is_honored_no_matter_how_late(sent, monkeypatch):
@@ -248,6 +269,12 @@ def test_cheaper_rate_shows_structured_savings_and_confirm_buttons(sent, monkeyp
     v2._present_deal("cust", _Packet())
     body = next(m[1] for m in sent if m[0] == "buttons")
     assert "31,683" in body and "28,015.64" in body and "3,667" in body
+    # The deal card is a full, self-contained recap -- not just the price
+    # delta -- since a customer might forward just this message on its own.
+    assert "Test Hotel" in body
+    assert "Sep 21" in body and "Sep 22" in body   # dates
+    assert "2 adult" in body                        # occupancy
+    assert "Deluxe Room" in body and "Breakfast" in body and "Refundable" in body
     ids = [bid for bid, _ in next(m[2] for m in sent if m[0] == "buttons")]
     assert ids == ["confirm_book", "decline_book"]
     assert "cust" in v2._WA_SESSIONS and v2._WA_SESSIONS["cust"]["state"] == "presented"

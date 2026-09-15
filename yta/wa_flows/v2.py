@@ -220,6 +220,9 @@ def _recap_block(packet) -> str:
         room_bits.append("Non-refundable")
     if room_bits:
         lines.append(" · ".join(room_bits))
+    if packet.ota_benchmark.final_payable:
+        ccy = (packet.ota_benchmark.currency or "").strip()
+        lines.append(f"Price shown: {ccy} {packet.ota_benchmark.final_payable:,.0f}".replace("  ", " "))
     return "\n".join(lines)
 
 
@@ -250,6 +253,43 @@ def _found_and_ask_message(packet, missing: list, clarify: str | None = None) ->
     if not recap:
         return f"I wasn't able to pick up much from that screenshot — {question}"
     return f"{random.choice(_FOUND_OPENERS)}\n\n{recap}\n\n{question}"
+
+
+def _deal_recap_block(packet, best: dict) -> str:
+    """Same shape as _recap_block(), but for the actual offer being
+    quoted -- room/meal/refundable come from the matched TripJack option
+    when available (it can word these slightly differently than what the
+    OTA page showed), falling back to the customer's original request
+    only where TripJack didn't return its own value. Dates/occupancy
+    don't change between what was asked and what's being offered, so
+    those still come straight from the packet."""
+    lines = []
+    if packet.hotel.name:
+        lines.append(f"*{packet.hotel.name}*")
+    date_occ = []
+    if packet.stay.check_in and packet.stay.check_out:
+        date_occ.append(f"{_short_date(packet.stay.check_in)} → {_short_date(packet.stay.check_out)}")
+    if packet.stay.occupancy:
+        date_occ.append(occ_repr(packet.stay.occupancy))
+    if date_occ:
+        lines.append(" · ".join(date_occ))
+    room_bits = []
+    room_name = best.get("room_name") or packet.requested_offer.room_name
+    if room_name:
+        room_bits.append(room_name)
+    meal = best.get("meal_basis") or packet.requested_offer.meal_plan
+    if meal:
+        room_bits.append(meal)
+    refundable = best.get("refundable")
+    if refundable is None:
+        refundable = packet.requested_offer.refundable
+    if refundable is True:
+        room_bits.append("Refundable")
+    elif refundable is False:
+        room_bits.append("Non-refundable")
+    if room_bits:
+        lines.append(" · ".join(room_bits))
+    return "\n".join(lines)
 
 
 def _deal_message(packet, resolution) -> tuple:
@@ -290,21 +330,9 @@ def _deal_message(packet, resolution) -> tuple:
         return ("I checked, but the price you already have looks like the best "
                  "deal for this stay — nothing better to offer right now."), True, False
 
-    header_bits = [packet.hotel.name or "this hotel"]
-    if best.get("room_name"):
-        header_bits.append(best["room_name"])
-    header = " · ".join(header_bits)
+    recap = _deal_recap_block(packet, best)
 
-    amenity_bits = []
-    if best.get("meal_basis"):
-        amenity_bits.append(best["meal_basis"])
-    if best.get("refundable") is True:
-        amenity_bits.append("Refundable")
-    elif best.get("refundable") is False:
-        amenity_bits.append("Non-refundable")
-    amenities = " · ".join(amenity_bits)
-
-    lines = ["*Good news — I found you a better rate.*", "", header]
+    lines = ["*Good news — I found you a better rate.*", "", recap, ""]
     if comparable:
         diff = ota_price - sell
         dpct = (diff / ota_price * 100) if ota_price else 0
@@ -314,8 +342,6 @@ def _deal_message(packet, resolution) -> tuple:
     else:
         lines[0] = "*Good news — I found you a rate.*"
         lines.append(f"BookMyStay price: {ccy} {sell:,.2f}")
-    if amenities:
-        lines.append(amenities)
     lines.append("")
     lines.append("Shall I go ahead and secure this for you?")
     return "\n".join(lines), True, True
@@ -358,6 +384,10 @@ def _run_extraction(frm: str, url, media) -> None:
         whatsapp.send_buttons(frm, _found_and_ask_message(packet, missing),
                                [("start_new_chat", "Start over")])
         return
+    # Everything needed came in on the first submission -- still show what
+    # was actually read before quoting a price, same as the ask-for-more
+    # path does, so the customer can catch a bad extraction either way.
+    wa_send(frm, f"Got it all — here's what I have:\n\n{_recap_block(packet)}")
     _present_deal(frm, packet)
 
 
