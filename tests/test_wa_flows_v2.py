@@ -258,6 +258,39 @@ def test_unrecognized_reply_in_presented_state_reprompts_and_stays_open(sent, mo
 
 # -- the deal reveal: matched-and-cheaper / matched-not-cheaper / no rate --
 
+def test_price_rows_use_a_real_monospace_block_not_hand_padded_spaces(sent, monkeypatch):
+    # Regression: an earlier version hand-padded labels with literal spaces
+    # assuming a monospace font -- WhatsApp renders proportional text, so
+    # that padding didn't align anything, it just looked broken. Real
+    # alignment needs an actual ```monospace``` fence.
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {"room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+            {"option_id": "o1", "room_name": "Deluxe Room", "currency": "INR", "total_price": 28015.64},
+        ]}},
+    )
+    v2._present_deal("cust", _Packet())
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "```" in body
+    assert " " * 4 not in body.split("```")[0]   # no hand-padding outside the fenced block
+
+
+def test_shouty_and_stray_punctuation_room_names_get_cleaned_up(sent, monkeypatch):
+    # Regression: "DELUXE ROOM" (all-caps from TripJack) and "Deluxe Room."
+    # (a stray trailing period from the OTA extraction) both showed up
+    # verbatim in live testing.
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {"room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+            {"option_id": "o1", "room_name": "DELUXE ROOM", "currency": "INR", "total_price": 28015.64},
+        ]}},
+    )
+    v2._present_deal("cust", _Packet())
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "DELUXE ROOM" not in body
+    assert "Deluxe Room" in body
+
+
 def test_cheaper_rate_shows_structured_savings_and_confirm_buttons(sent, monkeypatch):
     monkeypatch.setattr(
         "yta.web._resolve",

@@ -194,6 +194,35 @@ def _short_date(iso_str):
         return iso_str
 
 
+def _clean_room_name(name):
+    """Room names come straight from the OTA page or TripJack's own
+    catalog, unedited -- "DELUXE ROOM" (shouting caps) and "Deluxe Room."
+    (a stray trailing period) both showed up verbatim in live testing.
+    Strip the obviously-wrong bits without rewriting a name that already
+    has deliberate mixed case."""
+    if not name:
+        return name
+    name = name.strip().rstrip(".").strip()
+    if name.isupper():
+        name = name.title()
+    return name
+
+
+def _price_rows_block(rows: list) -> str:
+    """WhatsApp renders in a proportional font -- hand-padding labels with
+    spaces (tried in an earlier version) does NOT line values up, it just
+    looks like broken, arbitrary whitespace. Real alignment needs
+    WhatsApp's own ```monospace``` block, with padding computed to that
+    fixed-width font. `rows` is [(label, value), ...]."""
+    if len(rows) == 1:
+        label, value = rows[0]
+        return f"{label}: {value}"
+    labels = [f"{label}:" for label, _ in rows]
+    width = max(len(l) for l in labels) + 2
+    lines = [labels[i].ljust(width) + rows[i][1] for i in range(len(rows))]
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
 def _recap_block(packet) -> str:
     """The facts a customer would actually want to verify, as a clean
     labeled block -- kept structured on purpose even though the messages
@@ -210,8 +239,9 @@ def _recap_block(packet) -> str:
     if date_occ:
         lines.append(" · ".join(date_occ))
     room_bits = []
-    if packet.requested_offer.room_name:
-        room_bits.append(packet.requested_offer.room_name)
+    room_name = _clean_room_name(packet.requested_offer.room_name)
+    if room_name:
+        room_bits.append(room_name)
     if packet.requested_offer.meal_plan:
         room_bits.append(packet.requested_offer.meal_plan)
     if packet.requested_offer.refundable is True:
@@ -274,7 +304,7 @@ def _deal_recap_block(packet, best: dict) -> str:
     if date_occ:
         lines.append(" · ".join(date_occ))
     room_bits = []
-    room_name = best.get("room_name") or packet.requested_offer.room_name
+    room_name = _clean_room_name(best.get("room_name") or packet.requested_offer.room_name)
     if room_name:
         room_bits.append(room_name)
     meal = best.get("meal_basis") or packet.requested_offer.meal_plan
@@ -336,12 +366,14 @@ def _deal_message(packet, resolution) -> tuple:
     if comparable:
         diff = ota_price - sell
         dpct = (diff / ota_price * 100) if ota_price else 0
-        lines.append(f"Your price:{' ' * 8}{ota_ccy} {ota_price:,.0f}")
-        lines.append(f"BookMyStay price:{' ' * 3}{ccy} {sell:,.2f}")
-        lines.append(f"You save:{' ' * 6}{ccy} {diff:,.0f} ({dpct:.0f}%)")
+        lines.append(_price_rows_block([
+            ("Your price", f"{ota_ccy} {ota_price:,.0f}"),
+            ("BookMyStay price", f"{ccy} {sell:,.2f}"),
+            ("You save", f"{ccy} {diff:,.0f} ({dpct:.0f}%)"),
+        ]))
     else:
         lines[0] = "*Good news — I found you a rate.*"
-        lines.append(f"BookMyStay price: {ccy} {sell:,.2f}")
+        lines.append(_price_rows_block([("BookMyStay price", f"{ccy} {sell:,.2f}")]))
     lines.append("")
     lines.append("Shall I go ahead and secure this for you?")
     return "\n".join(lines), True, True
