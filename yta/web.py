@@ -33,6 +33,15 @@ from yta.profiles import route
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8765))
 
+# Gates /api/extract, /api/review, /api/job when this server is reachable
+# from outside localhost (the AWS box, behind Caddy) -- those routes run a
+# real LLM call and a real TripJack pricing call per hit, so exposing them
+# with no check at all would let anyone on the internet run both at our
+# cost. Unset (the local dev default) means no gate, same as before this
+# existed. Never applied to /webhook/whatsapp -- Meta calls that one, not
+# the extension, and it has its own verify-token handshake already.
+EXTENSION_KEY = os.environ.get("YTA_EXTENSION_KEY", "")
+
 # in-memory job registry: job_id -> {log: [...], done: bool, result / error}
 _JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
@@ -601,15 +610,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-YTA-Key")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _authorized(self) -> bool:
+        if not EXTENSION_KEY:
+            return True
+        return self.headers.get("X-YTA-Key") == EXTENSION_KEY
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
             return
         if self.path.startswith("/api/job"):
+            if not self._authorized():
+                self._send(401, b'{"error":"unauthorized"}')
+                return
             jid = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
             job = _JOBS.get(jid)
             if not job:
@@ -656,9 +673,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in ("/api/extract", "/api/review"):
             self._send(404, b'{"error":"not found"}')
             return
+        # Read (and thereby drain) the body BEFORE any early return -- this
+        # connection is HTTP/1.1 keep-alive, and leaving unread body bytes
+        # on the socket after a 401 corrupts the next request Caddy sends
+        # on the same connection (seen live: a wrong-key request occasionally
+        # made the FOLLOWING request fail with a bogus 501 "unsupported
+        # method", the leftover bytes of this one's body glued onto the next
+        # request line). Auth is checked after reading, before parsing.
+        n = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(n)
+        if not self._authorized():
+            self._send(401, b'{"error":"unauthorized"}')
+            return
         try:
-            n = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(n) or b"{}")
+            req = json.loads(raw or b"{}")
         except Exception as e:  # noqa: BLE001
             self._send(400, json.dumps({"error": f"bad request: {e}"}).encode())
             return

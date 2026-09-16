@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "BookMyStay — OTA Extractor",
   "version": "0.8.0",
-  "description": "Reads hotel name, dates, occupancy and room/price straight from the OTA tab you have open (real, logged-in session), sends it to the local BookMyStay pipeline, drops a BookMyStay price-comparison card right next to the OTA's own price on the page, and lets the user book the matched rate over WhatsApp with a configurable markup.",
+  "description": "Reads hotel name, dates, occupancy and room/price straight from the OTA tab you have open (real, logged-in session), sends it to the BookMyStay pipeline, drops a BookMyStay price-comparison card right next to the OTA's own price on the page, and lets the user book the matched rate over WhatsApp with a configurable markup.",
   "action": {
     "default_popup": "popup.html",
     "default_title": "Extract this OTA page"
@@ -12,7 +12,7 @@
     "open_in_tab": true
   },
   "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "host_permissions": ["https://api.pockettravelworld.com/*"],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

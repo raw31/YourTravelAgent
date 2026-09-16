@@ -1,8 +1,13 @@
-// YourTravelAgent popup — collects the active tab's booking data via
-// bridge.js/capture.js and posts it to the SAME local endpoint the debug
-// panel (yta/web.py) already serves: no separate server, no separate
-// pipeline. `page_data` just takes priority over Playwright render there.
-const BASE = "http://127.0.0.1:8765";
+// BookMyStay popup — collects the active tab's booking data via
+// bridge.js/capture.js and posts it to the AWS-hosted yta.web API (same
+// pipeline the WhatsApp bot uses) — nothing runs locally, no API keys on
+// this machine. X-YTA-Key gates /api/extract and /api/job on that server
+// so the endpoint isn't wide open to the internet; it's a soft gate (any
+// installed copy of this extension can be read for it), not a secret
+// meant to withstand a determined technical user.
+const BASE = "https://api.pockettravelworld.com";
+const EXTENSION_KEY = "491567ae3b0cddec6b4a41b820a5e5aed29b1e4f4ad6e0fb";
+const API_HEADERS = { "X-YTA-Key": EXTENSION_KEY };
 
 const WHATSAPP_NUMBER = "+919556513073";
 
@@ -135,7 +140,7 @@ function poll(jobId, tabId, startedAt, clientMs) {
   const t = setInterval(async () => {
     let s;
     try {
-      s = await (await fetch(`${BASE}/api/job?id=${jobId}`)).json();
+      s = await (await fetch(`${BASE}/api/job?id=${jobId}`, { headers: API_HEADERS })).json();
     } catch (e) {
       return;                                   // panel not reachable yet — keep trying
     }
@@ -292,8 +297,9 @@ function render(result, tabId, totalSec, clientMs) {
   $out.innerHTML = rows.map(([k, v]) =>
     `<div class="row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`
   ).join("") + renderSteps(steps, totalSec ?? 0);
-  $link.href = BASE;
-  $link.style.display = "block";
+  // The full debug panel ("/") is deliberately not exposed publicly on the
+  // AWS backend -- only /api/extract, /api/review and /api/job are
+  // (behind X-YTA-Key) -- so there's nowhere for this link to point anymore.
 }
 
 async function extractCurrentTab() {
@@ -339,14 +345,15 @@ async function extractCurrentTab() {
   let jobId;
   try {
     const r = await fetch(`${BASE}/api/extract`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...API_HEADERS },
       body: JSON.stringify(body),
     });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     jobId = j.job_id;
   } catch (e) {
-    $status.textContent = `Could not reach ${BASE} — is "python -m yta.web" running? (${e.message})`;
+    $status.textContent = `Could not reach ${BASE} (${e.message})`;
     $go.disabled = false;
     return;
   }
