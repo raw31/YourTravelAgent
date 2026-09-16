@@ -252,14 +252,14 @@ function render(result, tabId, totalSec, clientMs) {
       if (chrome.runtime.lastError) {
         // most likely: the extension/tab needs a reload after an update
         const note = document.createElement("div");
-        note.style.cssText = "margin-top:6px;color:#f87171;font-size:11px;";
+        note.style.cssText = "margin-top:6px;color:#D9591A;font-size:11px;";
         note.textContent = "Card not shown — reload this tab (and the extension "
           + "if it was just updated) and try again.";
         $out.appendChild(note);
         return;
       }
       const note = document.createElement("div");
-      note.style.cssText = "margin-top:6px;color:#8b949e;font-size:11px;";
+      note.style.cssText = "margin-top:6px;color:#9A9A9A;font-size:11px;";
       if (!resp || !resp.placed) {
         note.textContent = "Card not shown on the page" + (resp && resp.error ? `: ${resp.error}` : ".");
       } else if (resp.mode === "floating") {
@@ -314,7 +314,7 @@ async function extractCurrentTab() {
 
   const tab = await getActiveTab();
   if (!tab || !tab.url || !tab.url.startsWith("http")) {
-    $status.textContent = "Open an OTA hotel/booking page first.";
+    $status.textContent = "Open the hotel review page / final deal page first.";
     $go.disabled = false;
     return;
   }
@@ -365,7 +365,7 @@ async function extractCurrentTab() {
 
 $go.addEventListener("click", extractCurrentTab);
 
-// "Book this rate with me" — build a human-readable summary of the matched
+// "Book this rate with TripJack" — build a human-readable summary of the matched
 // deal and hand it to the user as a pre-filled WhatsApp message. This is
 // deliberately NOT a real booking flow (no payment, no PII collection,
 // nothing sent anywhere automatically) — it just saves the user retyping
