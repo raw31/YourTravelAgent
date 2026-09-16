@@ -1,4 +1,4 @@
-// BookMyStay popup — collects the active tab's booking data via
+// TripJack popup — collects the active tab's booking data via
 // bridge.js/capture.js and posts it to the AWS-hosted yta.web API (same
 // pipeline the WhatsApp bot uses) — nothing runs locally, no API keys on
 // this machine. X-YTA-Key gates /api/extract and /api/job on that server
@@ -165,22 +165,22 @@ function render(result, tabId, totalSec, clientMs) {
   const ok = p.status === "ok";
   const timeTxt = totalSec != null ? ` in ${totalSec.toFixed(1)}s` : "";
   $status.textContent = ok ? `✓ Extracted${timeTxt}`
-    : `✗ Missing${timeTxt}: ` + (p.missing_mandatory || []).join(", ") + " — try pasting the page in the full panel.";
+    : `✗ Missing${timeTxt}: ` + (p.missing_mandatory || []).join(", ") + " — try reloading the tab and fetching again.";
 
   const rows = [
     ["Hotel", p.hotel.name || "—"],
     ["Dates", `${p.stay.check_in || "?"} → ${p.stay.check_out || "?"}`],
     ["Occupancy", occRepr(p.stay.occupancy)],
     ["Room", p.requested_offer.room_name || "—"],
-    ["Price", p.ota_benchmark.final_payable
+    ["Page price", p.ota_benchmark.final_payable
       ? `${p.ota_benchmark.currency || ""} ${p.ota_benchmark.final_payable}` : "—"],
   ];
   if (rz.available && rz.match) {
     const band = esc(rz.band);
-    rows.push(["BookMyStay",
+    rows.push(["TripJack",
       `<span class="band band-${band}">${band}</span> ${esc(rz.match.tj_id)} · ${esc(rz.match.hotel_name)}`]);
   } else if (rz.available === false) {
-    rows.push(["BookMyStay", esc(rz.note || "not resolved")]);
+    rows.push(["TripJack", esc(rz.note || "not resolved")]);
   }
 
   const best = rz.room_map && rz.room_map.matched ? pickBestOption(rz.room_map) : null;
@@ -205,25 +205,25 @@ function render(result, tabId, totalSec, clientMs) {
     if (rz.detail_error) why = "pricing call failed: " + rz.detail_error;
     else if (rz.detail && !((rz.detail.options || []).length)) why = "no inventory for this hotel/stay";
     else if (rz.room_map && !rz.room_map.matched) why = `no confident room match (best score ${rz.room_map.score ?? "?"})`;
-    rows.push(["BookMyStay", `<span style="color:#8b949e">${esc(why)}</span>`]);
+    rows.push(["TripJack", `<span class="muted">${esc(why)}</span>`]);
   }
   if (best) {
     const band = esc(rz.room_map.band);
-    rows.push(["BookMyStay",
+    rows.push(["TripJack price",
       `<span class="band band-${band === "strong" ? "high" : "medium"}">${band}</span> ` +
-      `${esc(best.currency)} ${sellPrice}` +
-      (hasMarkup ? ` <span style="color:#8b949e;font-size:10.5px" title="our cost before markup">` +
+      `<span class="price">${esc(best.currency)} ${sellPrice}</span>` +
+      (hasMarkup ? ` <span class="muted" style="font-size:10.5px" title="our cost before markup">` +
         `(cost ${esc(best.currency)} ${best.total_price})</span>` : "")]);
 
     const sav = savingsInfo(p.ota_benchmark.final_payable, p.ota_benchmark.currency, sellPrice, best.currency);
     if (sav && !sav.comparable) {
-      rows.push(["Savings", `<span style="color:#8b949e">can't compare — different currencies `
+      rows.push(["Savings", `<span class="muted">can't compare — different currencies `
         + `(${esc(p.ota_benchmark.currency)} vs ${esc(best.currency)})</span>`]);
     } else if (sav) {
       const arrow = sav.cheaper ? "▼" : "▲";
       const word = sav.cheaper ? "cheaper" : "more";
-      const color = sav.cheaper ? "#4ade80" : "#f87171";
-      rows.push(["Savings", `<span style="color:${color};font-weight:600">${arrow} `
+      const cls = sav.cheaper ? "savings-up" : "savings-down";
+      rows.push(["Savings", `<span class="${cls}">${arrow} `
         + `${esc(best.currency)} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) ${word}</span>`]);
     }
     if (lastDeal) lastDeal.savings = sav;
@@ -294,9 +294,9 @@ function render(result, tabId, totalSec, clientMs) {
     steps.push({ ms: totalMs, msg: "waiting on the job-status poll (network)" });
   }
 
-  $out.innerHTML = rows.map(([k, v]) =>
+  $out.innerHTML = `<div class="card">` + rows.map(([k, v]) =>
     `<div class="row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`
-  ).join("") + renderSteps(steps, totalSec ?? 0);
+  ).join("") + `</div>` + renderSteps(steps, totalSec ?? 0);
   // The full debug panel ("/") is deliberately not exposed publicly on the
   // AWS backend -- only /api/extract, /api/review and /api/job are
   // (behind X-YTA-Key) -- so there's nowhere for this link to point anymore.
@@ -329,7 +329,7 @@ async function extractCurrentTab() {
   }
   const readMs = Date.now() - startedAt;
 
-  $status.textContent = "Sending to the local panel…";
+  $status.textContent = "Sending to TripJack…";
   const tPostStart = Date.now();
   const body = {
     url: tab.url,
@@ -382,7 +382,7 @@ function dealSummaryText(d) {
       ? `\n📉 ${d.tjCurrency} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) cheaper than the OTA`
       : `\n📈 ${d.tjCurrency} ${Math.abs(sav.diff).toFixed(0)} (${Math.abs(sav.pct).toFixed(1)}%) more than the OTA`;
   }
-  return `Hi! I'd like to book this via BookMyStay 🧳\n\n`
+  return `Hi! I'd like to book this via TripJack 🧳\n\n`
     + `🏨 ${d.hotelName || "—"}\n`
     + `🛏️ ${d.roomName || "—"}${meal ? " · " + meal : ""}\n`
     + `📅 ${d.checkIn || "?"} → ${d.checkOut || "?"}\n`

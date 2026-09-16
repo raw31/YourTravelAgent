@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "BookMyStay — OTA Extractor",
-  "version": "0.8.0",
-  "description": "Reads hotel name, dates, occupancy and room/price straight from the OTA tab you have open (real, logged-in session), sends it to the BookMyStay pipeline, drops a BookMyStay price-comparison card right next to the OTA's own price on the page, and lets the user book the matched rate over WhatsApp with a configurable markup.",
+  "name": "TripJack — OTA Extractor",
+  "version": "0.9.1",
+  "description": "Reads hotel name, dates, occupancy and room/price straight from the OTA tab you have open (real, logged-in session), fetches the matching TripJack price, drops a comparison card right next to the OTA's own price on the page, and lets the user book the matched rate over WhatsApp with a configurable markup.",
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Extract this OTA page"
+    "default_title": "Fetch TripJack price for this page"
   },
   "options_ui": {
     "page": "options.html",

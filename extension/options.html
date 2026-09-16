@@ -2,43 +2,49 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>BookMyStay — Admin</title>
+<title>TripJack — Admin</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: light;
+    --orange: #F26B21; --orange-dark: #D9591A;
+    --text: #2B2B2B; --text-2: #6B6B6B; --text-mute: #9A9A9A;
+    --bg: #FAF9F7; --surface: #FFFFFF; --border: #E9E7E3;
+    --success: #178A43; --success-bg: #EAF6EE;
+  }
   body { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: #0d1117; color: #e6edf3; margin: 0; padding: 32px;
+         background: var(--bg); color: var(--text); margin: 0; padding: 32px;
          display: flex; justify-content: center; }
   .wrap { width: 100%; max-width: 480px; }
-  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
-  .sub { color: #8b949e; font-size: 12.5px; margin: 0 0 24px; line-height: 1.5; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 700; }
+  .sub { color: var(--text-2); font-size: 12.5px; margin: 0 0 24px; line-height: 1.5; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
           padding: 18px 20px; margin-bottom: 16px; }
-  .card h2 { font-size: 13px; margin: 0 0 12px; color: #c9d1d9; font-weight: 600; }
-  label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 5px; }
+  .card h2 { font-size: 13px; margin: 0 0 12px; color: var(--text); font-weight: 700; }
+  label { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 5px; }
   .field { margin-bottom: 14px; }
   .field:last-child { margin-bottom: 0; }
   input[type=number], input[type=text] {
-    width: 100%; box-sizing: border-box; padding: 8px 10px; background: #0d1117;
-    border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 13px;
+    width: 100%; box-sizing: border-box; padding: 8px 10px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; color: var(--text); font-size: 13px;
   }
-  input[type=number]:focus, input[type=text]:focus { outline: none; border-color: #58a6ff; }
+  input[type=number]:focus, input[type=text]:focus { outline: none; border-color: var(--orange); }
   .row2 { display: flex; gap: 12px; }
   .row2 .field { flex: 1; }
-  .preview { margin-top: 4px; border-top: 1px solid #21262d; padding-top: 14px; }
+  .preview { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 14px; }
   .preview .line { display: flex; justify-content: space-between; font-size: 12.5px;
                     padding: 4px 0; }
-  .preview .k { color: #8b949e; }
-  .preview .v { font-weight: 600; }
-  .preview .v.sell { color: #4ade80; }
-  .savedTag { display: inline-block; font-size: 11px; color: #4ade80; margin-left: 8px;
+  .preview .k { color: var(--text-2); }
+  .preview .v { font-weight: 700; }
+  .preview .v.sell { color: var(--success); }
+  .savedTag { display: inline-block; font-size: 11px; color: var(--success); margin-left: 8px;
               opacity: 0; transition: opacity .15s; }
   .savedTag.show { opacity: 1; }
-  .hint { font-size: 11px; color: #6e7681; margin-top: 10px; line-height: 1.5; }
+  .hint { font-size: 11px; color: var(--text-mute); margin-top: 10px; line-height: 1.5; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>BookMyStay — Admin</h1>
+  <h1>TripJack — Admin</h1>
   <p class="sub">Settings here apply to every OTA page the extension reads — nothing here is
     site-specific. Changes save automatically and take effect on the next extraction.</p>
 

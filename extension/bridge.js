@@ -120,11 +120,11 @@
       </style>
       <div class="card">
         <div class="head">
-          <span class="brand">BookMyStay${band ? `<span class="band">${escapeHtml(band)}</span>` : ""}</span>
+          <span class="brand">TripJack${band ? `<span class="band">${escapeHtml(band)}</span>` : ""}</span>
           <button class="close" title="dismiss">✕</button>
         </div>
         <div class="row"><span class="k">This page</span><span class="v">${haveOurPrice ? escapeHtml(ourCurrency || "") + " " + escapeHtml(ourPrice) : "—"}</span></div>
-        <div class="row tj"><span class="k">BookMyStay</span><span class="v">${escapeHtml(tjCurrency || ourCurrency || "")} ${escapeHtml(tjPrice)}</span></div>
+        <div class="row tj"><span class="k">TripJack</span><span class="v">${escapeHtml(tjCurrency || ourCurrency || "")} ${escapeHtml(tjPrice)}</span></div>
         ${diffTxt ? `<div class="diff ${cheaper ? "down" : "up"}">${escapeHtml(diffTxt)}</div>` : ""}
         ${meta ? `<div class="meta" title="${meta}">${meta}</div>` : ""}
         ${floating ? `<div class="floatnote">(${!haveOurPrice ? "OTA price wasn't extracted from this page"
