@@ -576,7 +576,31 @@ def test_start_new_chat_button_clears_any_open_session(sent):
     _open_awaiting()
     v5.handle_batch("cust", [{"type": "button_reply", "button_id": "start_new_chat", "text": "Start over"}])
     assert "cust" not in v5._WA_SESSIONS
-    assert any("next one" in m[1].lower() for m in sent if m[0] == "text")
+    assert any("start fresh" in m[1].lower() for m in sent if m[0] == "text")
+
+
+def test_start_over_re_offers_the_onboarding_choice(sent):
+    # Regression: starting over used to leave the customer with a bare
+    # acknowledgment and no next step -- the deal/search choice needs to
+    # come back so the two-path flow actually restarts.
+    _open_awaiting()
+    v5.handle_batch("cust", [{"type": "button_reply", "button_id": "start_new_chat", "text": "Start over"}])
+    kind, body, buttons = next(m for m in sent if m[0] == "buttons")
+    assert body == v5._ONBOARDING_CHOICE_TEXT
+    assert [bid for bid, _ in buttons] == ["have_deal", "search_hotel"]
+
+
+def test_cancel_with_no_open_session_still_offers_the_choice(sent):
+    v5.handle_batch("cust", [{"type": "text", "text": "never mind"}])
+    kind, body, buttons = next(m for m in sent if m[0] == "buttons")
+    assert body == v5._ONBOARDING_CHOICE_TEXT
+
+
+def test_start_over_clears_any_pending_path(sent):
+    v5._PENDING_PATH["cust"] = "search"
+    _open_awaiting()
+    v5.handle_batch("cust", [{"type": "button_reply", "button_id": "start_new_chat", "text": "Start over"}])
+    assert "cust" not in v5._PENDING_PATH
 
 
 def test_missing_field_ask_carries_a_start_new_chat_button(sent, monkeypatch):
@@ -726,10 +750,12 @@ def test_search_hotel_path_proceeds_without_a_price(sent, monkeypatch):
                          lambda *a, **kw: _Packet(missing=["ota_benchmark.final_payable"], room_name=None))
     monkeypatch.setattr(
         "yta.web._resolve",
-        lambda packet: {"room_options": {"options": [
-            {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
-             "refundable": True, "currency": "INR", "total_price": 20000.0},
-        ], "types_found": ["SRSM"], "types_missing": ["SRCM", "CRSM", "CRCM"]}},
+        lambda packet: {"room_options": {"groups": [
+            {"room_type_id": "R1", "room_name": "Deluxe Room", "total_combos": 1, "options": [
+                {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
+                 "refundable": True, "currency": "INR", "total_price": 20000.0},
+            ]},
+        ]}},
     )
     v5.handle_batch("cust", [{"type": "text", "text": "Taj Santacruz, Sep 21-22, 2 adults"}])
     # never got stuck asking for the price -- went straight to presenting options
@@ -737,34 +763,38 @@ def test_search_hotel_path_proceeds_without_a_price(sent, monkeypatch):
     assert any("here's what's available" in m[1].lower() for m in sent if m[0] == "text")
 
 
-def test_present_option_choices_shows_room_once_then_meal_x_refund_variants(sent):
-    # All options here are variants of the SAME (cheapest) room -- the
-    # room name shows once at the top, not repeated per line.
-    options = [
-        {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Room Only",
-         "refundable": False, "currency": "INR", "total_price": 20000.0},
-        {"option_id": "s2", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
-         "refundable": False, "currency": "INR", "total_price": 21000.0},
-        {"option_id": "s3", "room_name": "Deluxe Room", "meal_basis": "Room Only",
-         "refundable": True, "currency": "INR", "total_price": 22000.0},
+def _rate(oid, room_name, meal, refundable, price):
+    return {"option_id": oid, "room_name": room_name, "meal_basis": meal,
+            "refundable": refundable, "currency": "INR", "total_price": price}
+
+
+def test_present_option_choices_shows_each_room_name_once_with_its_own_variants(sent):
+    groups = [
+        {"room_type_id": "R1", "room_name": "Deluxe Villa", "total_combos": 2, "options": [
+            _rate("r1", "Deluxe Villa", "Room Only", False, 20000.0),
+            _rate("r2", "Deluxe Villa", "Breakfast", False, 21000.0),
+        ]},
+        {"room_type_id": "R2", "room_name": "Premier Villa", "total_combos": 1, "options": [
+            _rate("p1", "Premier Villa", "Room Only", True, 25000.0),
+        ]},
     ]
-    resolution = {"detail": {"hotel_name": "Taj Santacruz"},
-                  "room_options": {"room_type_id": "R1", "room_name": "Deluxe Room",
-                                    "options": options}}
+    resolution = {"detail": {"hotel_name": "Taj Santacruz"}, "room_options": {"groups": groups}}
     v5._present_option_choices("cust", _Packet(), resolution)
     text = next(m[1] for m in sent if m[0] == "text")
     assert "Taj Santacruz" in text
-    assert "1️⃣" in text and "2️⃣" in text and "3️⃣" in text and "4️⃣" not in text
-    # room name appears exactly once (the 🛏️ line), not per numbered line
-    assert text.count("Deluxe Room") == 1
-    assert "Room Only" in text and "Breakfast" in text
-    assert "Non-refundable" in text and "Refundable" in text
-    assert "20,000.00" in text and "21,000.00" in text and "22,000.00" in text
-    assert v5._WA_SESSIONS["cust"]["options"] == options
+    # each room name appears exactly once, even though R1 has 2 lines under it
+    assert text.count("Deluxe Villa") == 1
+    assert text.count("Premier Villa") == 1
+    # numbering is sequential ACROSS rooms, not restarting per room
+    assert "1. Room Only" in text and "2. Breakfast" in text and "3. Room Only" in text
+    assert "Reply with a number (1–3)" in text
+    assert "20,000.00" in text and "21,000.00" in text and "25,000.00" in text
+    # session stores the FLATTENED list -- index 2 (picking "3") is p1
+    assert [o["option_id"] for o in v5._WA_SESSIONS["cust"]["options"]] == ["r1", "r2", "p1"]
 
 
 def test_present_option_choices_with_no_options_offers_try_another(sent):
-    resolution = {"detail": {"hotel_name": "Taj Santacruz"}, "room_options": {"options": []}}
+    resolution = {"detail": {"hotel_name": "Taj Santacruz"}, "room_options": {"groups": []}}
     v5._present_option_choices("cust", _Packet(), resolution)
     kind, body, buttons = next(m for m in sent if m[0] == "buttons")
     assert "Taj Santacruz" in body

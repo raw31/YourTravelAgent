@@ -2,7 +2,7 @@
 from yta.schema import Offer
 from yta.roommap import (
     map_rooms, meal_to_tj, split_name_and_view, views_match,
-    RoomNormalizationService, list_cheapest_room_variants,
+    RoomNormalizationService, list_cheapest_rooms,
 )
 
 
@@ -171,92 +171,92 @@ def test_map_rooms_accepts_supplier_options():
     assert r.ratekey_option_ids == ["o1"]
 
 
-# -- list_cheapest_room_variants: no requested room name -------------------
+# -- list_cheapest_rooms: no requested room name ----------------------------
 # Live finding that motivated this design: a real 90-option TripJack
 # response for one hotel was 100% optionType SRSM -- grouping by
-# optionType collapsed to a single "option". Anchoring on the cheapest
-# room overall, then its own meal x refundability variants, gives an
-# honest spread instead (however many actually exist for that room).
+# optionType collapsed to a single "option". Sorting ascending by price
+# and picking the 5 cheapest DISTINCT rooms (by their own lowest price),
+# each with up to 2 of its own meal x refundability variants, gives an
+# honest spread instead.
 
-_VARIANT_OPTIONS = [
-    # R1 is the cheapest room overall (35000) and has 3 real combos.
+_MULTI_ROOM_OPTIONS = [
+    # R1 cheapest overall (35000), 3 real combos -- only 2 should show.
     _opt("R1", "Deluxe Villa", "Room Only", False, 35000, "r1"),
     _opt("R1", "Deluxe Villa", "Breakfast", False, 38000, "r2"),
     _opt("R1", "Deluxe Villa", "Room Only", True, 40000, "r3"),
-    # R2 is pricier overall but has more combo diversity -- should NOT be
-    # picked just because it has more variety than the cheapest room.
+    # R2 second cheapest (45000).
     _opt("R2", "Premier Villa", "Room Only", False, 45000, "p1"),
     _opt("R2", "Premier Villa", "Breakfast", False, 46000, "p2"),
-    _opt("R2", "Premier Villa", "Room Only", True, 47000, "p3"),
-    _opt("R2", "Premier Villa", "Breakfast", True, 48000, "p4"),
+    # R3 third cheapest (50000), only 1 combo.
+    _opt("R3", "Executive Villa", "Room Only", False, 50000, "e1"),
 ]
 
 
-def test_list_cheapest_room_variants_anchors_on_the_cheapest_room():
-    r = list_cheapest_room_variants(_VARIANT_OPTIONS)
-    assert r.room_type_id == "R1"
-    assert r.room_name == "Deluxe Villa"
-    assert r.total_combos == 3
-    assert [o.option_id for o in r.options] == ["r1", "r2", "r3"]   # cheapest combo first
+def test_list_cheapest_rooms_orders_rooms_by_their_own_cheapest_price():
+    r = list_cheapest_rooms(_MULTI_ROOM_OPTIONS)
+    assert [g.room_type_id for g in r.groups] == ["R1", "R2", "R3"]
+    assert [g.room_name for g in r.groups] == ["Deluxe Villa", "Premier Villa", "Executive Villa"]
 
 
-def test_list_cheapest_room_variants_caps_at_max_options():
-    # R1 with 5 distinct combos -- only 4 should come back by default.
-    opts = [
-        _opt("R1", "Deluxe Villa", "Room Only", False, 30000, "a1"),
-        _opt("R1", "Deluxe Villa", "Breakfast", False, 31000, "a2"),
-        _opt("R1", "Deluxe Villa", "Half Board", False, 32000, "a3"),
-        _opt("R1", "Deluxe Villa", "Full Board", False, 33000, "a4"),
-        _opt("R1", "Deluxe Villa", "All Inclusive", False, 34000, "a5"),
-    ]
-    r = list_cheapest_room_variants(opts)
-    assert r.total_combos == 5
-    assert len(r.options) == 4
-    assert [o.option_id for o in r.options] == ["a1", "a2", "a3", "a4"]
+def test_list_cheapest_rooms_caps_at_max_per_room():
+    r = list_cheapest_rooms(_MULTI_ROOM_OPTIONS)
+    r1 = next(g for g in r.groups if g.room_type_id == "R1")
+    assert r1.total_combos == 3                 # 3 real combos exist
+    assert len(r1.options) == 2                  # only 2 shown (default max_per_room)
+    assert [o.option_id for o in r1.options] == ["r1", "r2"]   # cheapest 2 combos
+    r3 = next(g for g in r.groups if g.room_type_id == "R3")
+    assert r3.total_combos == 1 and len(r3.options) == 1
 
 
-def test_list_cheapest_room_variants_ignores_other_rooms_entirely():
-    r = list_cheapest_room_variants(_VARIANT_OPTIONS)
-    ids = {o.option_id for o in r.options}
-    assert ids.isdisjoint({"p1", "p2", "p3", "p4"})   # R2's options never leak in
+def test_list_cheapest_rooms_caps_at_max_rooms():
+    opts = [_opt(f"R{i}", f"Room {i}", "Room Only", False, 30000 + i * 1000, f"o{i}")
+            for i in range(1, 8)]                 # 7 distinct rooms
+    r = list_cheapest_rooms(opts)
+    assert len(r.groups) == 5                     # only 5 rooms by default
+    assert [g.room_type_id for g in r.groups] == ["R1", "R2", "R3", "R4", "R5"]
 
 
-def test_list_cheapest_room_variants_price_tie_is_deterministic():
+def test_list_cheapest_rooms_custom_limits():
+    r = list_cheapest_rooms(_MULTI_ROOM_OPTIONS, max_rooms=2, max_per_room=1)
+    assert len(r.groups) == 2
+    assert all(len(g.options) == 1 for g in r.groups)
+
+
+def test_list_cheapest_rooms_price_tie_is_deterministic():
     opts = [_opt("R1", "Deluxe Villa", "Room Only", False, 40000, "z9"),
             _opt("R1", "Deluxe Villa", "Room Only", False, 40000, "a1")]
-    r = list_cheapest_room_variants(opts)
-    assert len(r.options) == 1               # same combo -- one wins, not both
-    assert r.options[0].option_id == "a1"    # lower option_id wins the tie
-    r2 = list_cheapest_room_variants(list(reversed(opts)))
-    assert r2.options[0].option_id == "a1"
+    r = list_cheapest_rooms(opts)
+    assert len(r.groups) == 1
+    assert len(r.groups[0].options) == 1          # same combo -- one wins, not both
+    assert r.groups[0].options[0].option_id == "a1"   # lower option_id wins the tie
+    r2 = list_cheapest_rooms(list(reversed(opts)))
+    assert r2.groups[0].options[0].option_id == "a1"
 
 
-def test_list_cheapest_room_variants_zero_options():
-    r = list_cheapest_room_variants([])
-    assert r.options == []
-    assert r.room_type_id is None
-    assert r.total_combos == 0
+def test_list_cheapest_rooms_zero_options():
+    r = list_cheapest_rooms([])
+    assert r.groups == []
     assert r.notes
 
 
-def test_list_cheapest_room_variants_accepts_supplier_options_too():
+def test_list_cheapest_rooms_accepts_supplier_options_too():
     from yta.tripjack.hotel import _norm_option
-    sopts = [_norm_option(o) for o in _VARIANT_OPTIONS]
-    r_raw = list_cheapest_room_variants(_VARIANT_OPTIONS)
-    r_sup = list_cheapest_room_variants(sopts)
-    assert [o.option_id for o in r_raw.options] == [o.option_id for o in r_sup.options]
+    sopts = [_norm_option(o) for o in _MULTI_ROOM_OPTIONS]
+    r_raw = list_cheapest_rooms(_MULTI_ROOM_OPTIONS)
+    r_sup = list_cheapest_rooms(sopts)
+    flat_raw = [o.option_id for g in r_raw.groups for o in g.options]
+    flat_sup = [o.option_id for g in r_sup.groups for o in g.options]
+    assert flat_raw == flat_sup
 
 
-def test_list_cheapest_room_variants_tags_the_global_cheapest():
-    r = list_cheapest_room_variants(_VARIANT_OPTIONS)
-    tagged_cheapest = [o for o in r.options if "cheapest-overall" in o.tags]
-    assert len(tagged_cheapest) == 1 and tagged_cheapest[0].option_id == "r1"
-    assert all("cheapest-in-combo" in o.tags for o in r.options if o.option_id != "r1")
+def test_list_cheapest_rooms_tags_every_option():
+    r = list_cheapest_rooms(_MULTI_ROOM_OPTIONS)
+    assert all(o.tags == ["cheapest-in-room"] for g in r.groups for o in g.options)
 
 
 def test_map_rooms_still_works_unmodified_after_option_type_additions():
     # Regression: the _rows()/RateOption additions for
-    # list_cheapest_room_variants() must not perturb map_rooms()'s own
+    # list_cheapest_rooms() must not perturb map_rooms()'s own
     # bucketing/scoring/tagging.
     off = Offer(room_name="Deluxe Villa", meal_plan="Half Board", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)

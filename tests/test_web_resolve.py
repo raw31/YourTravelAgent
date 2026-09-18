@@ -1,6 +1,6 @@
 """yta.web._resolve() — the fork between the existing single-room
-map_rooms() path and the list_cheapest_room_variants() path (no requested
-room name). No network: yta.hoteldb.db.db_path, yta.hoteldb.link.resolve_packet,
+map_rooms() path and the list_cheapest_rooms() path (no requested room
+name). No network: yta.hoteldb.db.db_path, yta.hoteldb.link.resolve_packet,
 yta.tripjack.client.TripJackClient.from_env, and yta.tripjack.hotel.hotel_options
 are all faked.
 """
@@ -97,19 +97,18 @@ def _wire_common_mocks(monkeypatch, options):
                          lambda *a, **kw: _FakeDetail(options))
 
 
-def test_no_room_name_routes_to_list_cheapest_room_variants(monkeypatch):
+def test_no_room_name_routes_to_list_cheapest_rooms(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     d = _resolve(_packet(room_name=None))
     assert "room_map" not in d
     assert "room_options" in d
-    ro = d["room_options"]
-    # anchors on the cheapest option overall (s1, room R1), then lists
-    # THAT room's own meal x refundability variants -- c2 (room R2) is a
-    # different room entirely and must not leak in.
-    assert ro["room_type_id"] == "R1"
-    assert ro["room_name"] == "Deluxe Room"
-    assert ro["total_combos"] == 2
-    assert [o["option_id"] for o in ro["options"]] == ["s1", "c1"]
+    groups = d["room_options"]["groups"]
+    # 2 distinct rooms, ordered by each room's own cheapest price: R1
+    # (s1, c1 -- both real combos) then R2 (c2).
+    assert [g["room_type_id"] for g in groups] == ["R1", "R2"]
+    assert groups[0]["room_name"] == "Deluxe Room"
+    assert [o["option_id"] for o in groups[0]["options"]] == ["s1", "c1"]
+    assert [o["option_id"] for o in groups[1]["options"]] == ["c2"]
 
 
 def test_room_name_present_is_completely_unaffected(monkeypatch):
@@ -144,5 +143,5 @@ def test_no_room_name_path_logs_a_summary_line(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     pkt = _packet(room_name=None)
     _resolve(pkt)
-    assert any("no requested room name" in l["msg"] and "Deluxe Room" in l["msg"]
+    assert any("no requested room name" in l["msg"] and "2 room" in l["msg"]
                for l in pkt.run_log)

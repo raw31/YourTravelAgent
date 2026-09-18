@@ -32,13 +32,16 @@ What v5 adds on top:
      single-room deal and a no-room submission on its own.
   11. When _resolve() comes back with `room_options` (no room was ever
      requested) instead of `room_map`, _present_deal hands off to
-     _present_option_choices -- a numbered text list of up to 4 meal x
-     refundability variants of the single CHEAPEST room TripJack returned
-     (yta.roommap.list_cheapest_room_variants() -- grouping by TripJack's
-     own optionType turned out not to reliably diversify: a real 90-option
-     response for one hotel was 100% SRSM), shown once at the top since
-     every option is the same room, with a new "choosing_option" session
-     state. A numeric reply maps to the picked
+     _present_option_choices -- up to 5 DISTINCT rooms (the cheapest 5,
+     ranked by each room's own lowest price), each with up to 2 of its
+     own meal x refundability variants underneath
+     (yta.roommap.list_cheapest_rooms() -- grouping by TripJack's own
+     optionType turned out not to reliably diversify: a real 90-option
+     response for one hotel was 100% SRSM). Numbered sequentially across
+     the WHOLE list, not restarting per room, so a numeric reply maps to
+     exactly one option regardless of which room it's under, via a new
+     "choosing_option" session state holding the flattened list. A
+     numeric reply maps to the picked
      RateOption, which is repackaged into a synthetic single-option
      `room_map` and handed to the SAME `_send_deal_result()` the single-
      room path already uses -- so confirm/decline, lead recording, and
@@ -415,24 +418,26 @@ def _send_deal_result(frm: str, packet, resolution: dict | None) -> None:
 
 def _present_option_choices(frm: str, packet, resolution: dict) -> None:
     """The no-requested-room path: resolution["room_options"]
-    (yta.roommap.list_cheapest_room_variants()) anchors on the single
-    cheapest option TripJack returned across the whole hotel, then names
-    up to 4 meal x refundability variants of THAT SAME room -- so unlike
-    the single-room deal card, every option here shares one room, shown
-    ONCE at the top rather than repeated on every line. Shows them as a
-    numbered text list (WhatsApp's reply buttons cap at 3, and this
-    codebase has no list-message support to show up to 4 as tappable rows)
-    and opens a "choosing_option" session for the numeric reply."""
+    (yta.roommap.list_cheapest_rooms()) names up to 5 DISTINCT rooms
+    (the cheapest 5, ranked by each room's own lowest price), each with
+    up to 2 of its own meal x refundability variants. Shown as room
+    headers with their variants underneath, numbered SEQUENTIALLY across
+    the whole list (not restarting per room) so a numeric reply maps to
+    exactly one option regardless of which room it's under. WhatsApp's
+    reply buttons cap at 3 and this codebase has no list-message support
+    (up to 10 tappable rows) -- a numbered text list + numeric reply is
+    the practical alternative. Opens a "choosing_option" session holding
+    the FLATTENED option list for that reply."""
     from yta import whatsapp
 
     rz = resolution or {}
-    rv = rz.get("room_options") or {}
-    options = rv.get("options") or []
+    groups = (rz.get("room_options") or {}).get("groups") or []
+    flat_options = [opt for g in groups for opt in (g.get("options") or [])]
     hotel_name = (rz.get("detail") or {}).get("hotel_name") \
         or (rz.get("match") or {}).get("hotel_name") \
         or packet.hotel.name or "this hotel"
 
-    if not options:
+    if not flat_options:
         whatsapp.send_buttons(
             frm, f"I wasn't able to find any live rates for {hotel_name} for these dates "
                  f"right now. Happy to take a look at another property, if you'd like?",
@@ -440,7 +445,6 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         print(f"[wa v5] batch for {frm} complete (no room_options available)", flush=True)
         return
 
-    room_name = _clean_room_name(rv.get("room_name")) or "Room"
     lines = [f"🏨 *{hotel_name}*"]
     date_occ = []
     if packet.stay.check_in and packet.stay.check_out:
@@ -449,27 +453,33 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         date_occ.append(occ_repr(packet.stay.occupancy))
     if date_occ:
         lines.append("📅 " + " · ".join(date_occ))
-    lines.append(f"🛏️ {room_name}")
     lines += ["", "Here's what's available:", ""]
 
-    numerals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-    for i, opt in enumerate(options):
-        bits = [opt.get("meal_basis") or "Room Only"]
-        if opt.get("refundable") is True:
-            bits.append("Refundable")
-        elif opt.get("refundable") is False:
-            bits.append("Non-refundable")
-        ccy = opt.get("currency") or ""
-        price = opt.get("total_price") or 0
-        lines.append(f"{numerals[i]} {' · '.join(bits)} — {ccy} {price:,.2f}")
-    lines += ["", f"Reply with a number (1–{len(options)}) to pick one."]
+    n = 0
+    for g in groups:
+        opts = g.get("options") or []
+        if not opts:
+            continue
+        lines.append(f"🛏️ *{_clean_room_name(g.get('room_name')) or 'Room'}*")
+        for opt in opts:
+            n += 1
+            bits = [opt.get("meal_basis") or "Room Only"]
+            if opt.get("refundable") is True:
+                bits.append("Refundable")
+            elif opt.get("refundable") is False:
+                bits.append("Non-refundable")
+            ccy = opt.get("currency") or ""
+            price = opt.get("total_price") or 0
+            lines.append(f"{n}. {' · '.join(bits)} — {ccy} {price:,.2f}")
+        lines.append("")
+    lines.append(f"Reply with a number (1–{n}) to pick one.")
 
     with _WA_SESSIONS_LOCK:
         _WA_SESSIONS[frm] = {"state": "choosing_option", "packet": packet,
-                              "resolution": resolution, "options": options,
+                              "resolution": resolution, "options": flat_options,
                               "unproductive_attempts": 0, "last_activity": time.time()}
     wa_send(frm, "\n".join(lines))
-    print(f"[wa v5] batch for {frm} complete ({len(options)} option(s) offered)", flush=True)
+    print(f"[wa v5] batch for {frm} complete ({n} option(s) across {len(groups)} room(s))", flush=True)
 
 
 def _present_deal(frm: str, packet) -> None:
@@ -696,10 +706,9 @@ def handle_batch(frm: str, items: list) -> None:
             if session is not None:
                 with _WA_SESSIONS_LOCK:
                     _WA_SESSIONS.pop(frm, None)
-                wa_send(frm, "Not a problem at all — send over the next one whenever you're ready.")
-            else:
-                wa_send(frm, "There's nothing to cancel just yet — send me a hotel's link "
-                             "or screenshot whenever you're ready.")
+                wa_send(frm, "Not a problem at all — let's start fresh.")
+            _PENDING_PATH.pop(frm, None)
+            _send_onboarding_choice(frm)
             return
 
         if button_id == "have_deal":

@@ -400,27 +400,16 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
         llm_used=llm_used, notes=notes, ratekey_option_ids=ratekey_ids)
 
 
-# -- no-requested-room path: cheapest room's meal x refundability variants
+# -- no-requested-room path: cheapest rooms x their meal/refund variants -
 
 @dataclass
-class RoomVariantsResult:
-    """Result of list_cheapest_room_variants() — the no-requested-room
-    path. Anchors on the single cheapest option TripJack returned (across
-    every room at this hotel), then lists up to `max_options` meal x
-    refundability variants of THAT SAME room, cheapest first.
-
-    TripJack's optionType classification (SRSM/SRCM/CRSM/CRCM) turned out
-    not to reliably produce more than one populated group for a given
-    hotel — seen live: a real 90-option response for one hotel was 100%
-    SRSM, so grouping by optionType collapsed to a single "option". A
-    concrete room's own meal/cancellation variants give an honest spread
-    instead; how many there actually are varies per room (`total_combos`)
-    and is never padded to look like more than TripJack actually offers."""
-    room_type_id: str | None
-    room_name: str | None
-    options: list                    # list[RateOption], up to max_options, cheapest first
-    total_combos: int                # distinct meal x refundability combos for this room
-    notes: list = field(default_factory=list)
+class RoomGroup:
+    """One room's slice of a RoomOptionsResult — up to `max_per_room`
+    meal x refundability variants of THIS room, cheapest first."""
+    room_type_id: str
+    room_name: str
+    options: list                    # list[RateOption], up to max_per_room
+    total_combos: int                # distinct meal x refundability combos AVAILABLE for this room
 
     def to_dict(self):
         d = asdict(self)
@@ -429,46 +418,77 @@ class RoomVariantsResult:
         return d
 
 
-def list_cheapest_room_variants(options, max_options: int = 4) -> RoomVariantsResult:
+@dataclass
+class RoomOptionsResult:
+    """Result of list_cheapest_rooms() — the no-requested-room path. Sorts
+    every option ascending by price, walks the sorted list picking the
+    first `max_rooms` DISTINCT rooms encountered (the cheapest `max_rooms`
+    rooms, ranked by each one's own lowest price), then lists up to
+    `max_per_room` of each room's own meal x refundability variants,
+    cheapest first.
+
+    TripJack's optionType classification (SRSM/SRCM/CRSM/CRCM) turned out
+    not to reliably produce more than one populated group for a given
+    hotel — seen live: a real 90-option response for one hotel was 100%
+    SRSM. Grouping by actual distinct rooms instead gives a real spread;
+    how many combos exist per room varies (`RoomGroup.total_combos`) and
+    is never padded to look like more than TripJack actually offers."""
+    groups: list                     # list[RoomGroup], up to max_rooms, cheapest-room-first
+    notes: list = field(default_factory=list)
+
+    def to_dict(self):
+        d = asdict(self)
+        d["groups"] = [g.to_dict() if isinstance(g, RoomGroup) else g
+                       for g in self.groups]
+        return d
+
+
+def list_cheapest_rooms(options, max_rooms: int = 5, max_per_room: int = 2) -> RoomOptionsResult:
     """Entry point for the no-requested-room-name case. `options`: TJ
     pricing options (raw dicts or SupplierOption list — same input shape
-    map_rooms() accepts). Sorts every option ascending by price, anchors
-    on the cheapest one's room_type_id, then groups THAT room's own
-    options by (meal_basis, refundable) — cheapest within each combo,
-    sorted cheapest-combo-first, capped at max_options. No matching, no
-    scoring, no LLM — there is nothing to match against."""
+    map_rooms() accepts). No matching, no scoring, no LLM — there is
+    nothing to match against."""
     rows = _rows(options)
     if not rows:
-        return RoomVariantsResult(None, None, [], 0,
-                                  ["TripJack returned no options to list"])
+        return RoomOptionsResult([], ["TripJack returned no options to list"])
 
-    cheapest = min(rows, key=lambda r: (r["total_price"], r["option_id"]))
-    rid = cheapest["room_type_id"]
-    room_rows = [r for r in rows if r["room_type_id"] == rid]
+    rows_sorted = sorted(rows, key=lambda r: (r["total_price"], r["option_id"]))
 
-    by_combo: dict = {}
-    for r in room_rows:
-        key = (r["meal_basis"] or "", r["refundable"])
-        cur = by_combo.get(key)
-        if cur is None or (r["total_price"], r["option_id"]) < (cur["total_price"], cur["option_id"]):
-            by_combo[key] = r
+    room_order = []
+    for r in rows_sorted:
+        if r["room_type_id"] not in room_order:
+            room_order.append(r["room_type_id"])
+        if len(room_order) >= max_rooms:
+            break
 
-    combos = sorted(by_combo.values(), key=lambda r: (r["total_price"], r["option_id"]))
-    total_combos = len(combos)
-    chosen = combos[:max_options]
+    by_room: dict = {}
+    for r in rows_sorted:
+        if r["room_type_id"] in room_order:
+            by_room.setdefault(r["room_type_id"], []).append(r)
 
-    out = []
-    for r in chosen:
-        tags = ["cheapest-overall"] if r["option_id"] == cheapest["option_id"] else ["cheapest-in-combo"]
-        out.append(RateOption(
+    groups = []
+    for rid in room_order:
+        room_rows = by_room[rid]
+        by_combo: dict = {}
+        for r in room_rows:
+            key = (r["meal_basis"] or "", r["refundable"])
+            cur = by_combo.get(key)
+            if cur is None or (r["total_price"], r["option_id"]) < (cur["total_price"], cur["option_id"]):
+                by_combo[key] = r
+        combos = sorted(by_combo.values(), key=lambda r: (r["total_price"], r["option_id"]))
+        total_combos = len(combos)
+        chosen = combos[:max_per_room]
+        opts = [RateOption(
             option_id=r["option_id"], room_type_id=r["room_type_id"],
             room_name=r["room_name"], meal_basis=r["meal_basis"],
             refundable=r["refundable"], total_price=r["total_price"],
-            currency=r["currency"], option_type=r.get("option_type", ""), tags=tags))
+            currency=r["currency"], option_type=r.get("option_type", ""),
+            tags=["cheapest-in-room"]) for r in chosen]
+        groups.append(RoomGroup(rid, room_rows[0]["room_name"], opts, total_combos))
 
-    notes = [f"{len(room_rows)} option(s) for room_type_id {rid} -> "
-             f"{total_combos} meal/refundability combo(s), {len(out)} shown"]
-    return RoomVariantsResult(rid, cheapest["room_name"], out, total_combos, notes)
+    notes = [f"{len(rows)} option(s) -> {len(groups)} room(s), "
+             f"up to {max_per_room} combo(s) shown each"]
+    return RoomOptionsResult(groups, notes)
 
 
 def _dump_buckets(buckets_rows, svc) -> list:
