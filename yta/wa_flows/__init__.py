@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 
-from yta.wa_flows import v0, v1, v2, v3, v4
+from yta.wa_flows import v0, v1, v2, v3, v4, v5
 
 FLOWS = {
     "v0": v0.handle_batch,
@@ -19,6 +19,7 @@ FLOWS = {
     "v2": v2.handle_batch,
     "v3": v3.handle_batch,
     "v4": v4.handle_batch,
+    "v5": v5.handle_batch,
 }
 DEFAULT_FLOW = "v0"
 
