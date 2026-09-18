@@ -17,13 +17,14 @@ llm_context / _json_digest path).
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from yta import extract_llm, llm
 from yta.profiles import route, GENERIC
 from yta.render import (render as render_page, clean_text, focus,
                         RenderResult, RenderUnavailable)
-from yta.schema import BookingIntent, Source, LLM, NETWORK, URL, now_iso, validate
+from yta.schema import BookingIntent, Source, LLM, NETWORK, URL, INFERRED, now_iso, validate
 from yta.structured import extract_structured
 from yta.urlfacts import latlng_from_url
 
@@ -271,6 +272,23 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
         pkt.source.extraction_method = f"{content_src}+llm:{'+'.join(used)}"
 
     _resolve_occupancy(pkt, url)
+
+    # A price with no currency loses the whole point of this tool -- the
+    # OTA-vs-TripJack comparison can't run without one (deal_message()'s
+    # `comparable` gate). Only fill this in for a pure typed-out/spoken
+    # submission (no url, no upload) -- a real OTA page or screenshot
+    # reliably shows its own currency, so a miss there is more likely a
+    # genuine ambiguity worth leaving alone; a customer typing "18000 me"
+    # with no symbol almost always means their own local currency, and
+    # this business only ever operates in one (TRIPJACK_CURRENCY). Seen
+    # live: a Hinglish free-text message captured the price (18000) but
+    # not a currency, silently losing the savings comparison entirely.
+    if not url and not media and page_text \
+            and pkt.ota_benchmark.final_payable and not pkt.ota_benchmark.currency:
+        default_ccy = os.environ.get("TRIPJACK_CURRENCY", "INR")
+        pkt.add("ota_benchmark.currency", default_ccy, INFERRED, 0.5,
+                "no currency stated in the message — defaulted to the account's own currency")
+        pkt.log(f"no currency found in the message text — defaulting to {default_ccy}")
 
     pkt.log("running sanity checks")
     if run_validate:

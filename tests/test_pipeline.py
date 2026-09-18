@@ -292,3 +292,82 @@ def test_generation_failed_falls_back_to_next_provider(monkeypatch):
     assert calls == ["groq", "gemini"]                    # fell through, didn't crash
     assert p.hotel.name == "Aloha on the Ganges"
     assert any("bad generation" in w for w in p.warnings)
+
+
+# -- currency default for a typed-out/spoken submission -------------------
+
+def test_missing_currency_on_free_text_defaults_to_account_currency(monkeypatch):
+    # Live bug: a Hinglish free-text message ("...18000 me...") captured
+    # the price but not a currency (no symbol was ever typed), silently
+    # losing the whole OTA-vs-TripJack savings comparison downstream.
+    monkeypatch.setenv("TRIPJACK_CURRENCY", "INR")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+    class _FakeRes:
+        fields = {"hotel.name": "Taj Santacruz",
+                  "stay.check_in": "2026-09-21", "stay.check_out": "2026-09-22",
+                  "stay.rooms": 1, "stay.occupancy": [{"adults": 2, "children": 0}],
+                  "requested_offer.room_name": "Luxury Room",
+                  "ota_benchmark.final_payable": 18000}      # no currency field at all
+        confidence = {}
+        provider, model = "fake", "fake"
+        contradictions = []
+
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract", lambda *a, **kw: _FakeRes())
+    p = extract("", render=False, page_text="taj santacruz 18000 me")
+    assert p.ota_benchmark.final_payable == 18000
+    assert p.ota_benchmark.currency == "INR"
+    assert any("defaulting to INR" in l["msg"] for l in p.run_log)
+
+
+def test_missing_currency_default_respects_a_non_inr_account_currency(monkeypatch):
+    monkeypatch.setenv("TRIPJACK_CURRENCY", "AED")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+    class _FakeRes:
+        fields = {"hotel.name": "Some Hotel", "ota_benchmark.final_payable": 500}
+        confidence = {}
+        provider, model = "fake", "fake"
+        contradictions = []
+
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract", lambda *a, **kw: _FakeRes())
+    p = extract("", render=False, page_text="some hotel 500 please")
+    assert p.ota_benchmark.currency == "AED"
+
+
+def test_currency_default_never_applies_to_a_url_or_media_submission(monkeypatch):
+    # The default is specifically for a typed-out/spoken submission with
+    # nothing else to go on -- a real OTA page or screenshot reliably shows
+    # its own currency, so a genuine miss there should stay unresolved
+    # rather than being silently papered over with a guess.
+    monkeypatch.setenv("TRIPJACK_CURRENCY", "INR")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+    class _FakeRes:
+        fields = {"hotel.name": "Aloha on the Ganges",
+                  "requested_offer.room_name": "Deluxe Room",
+                  "ota_benchmark.final_payable": 15390}     # no currency, same as above
+        confidence = {}
+        provider, model = "fake", "fake"
+        contradictions = []
+
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract", lambda *a, **kw: _FakeRes())
+    p = extract(BOOKING_URL, render=False)   # a real URL this time, no page_text
+    assert p.ota_benchmark.final_payable == 15390
+    assert p.ota_benchmark.currency is None
+    assert not any("defaulting to" in l["msg"] for l in p.run_log)
+
+
+def test_currency_default_does_not_override_a_real_extracted_currency(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+    class _FakeRes:
+        fields = {"hotel.name": "Some Hotel", "ota_benchmark.final_payable": 500,
+                  "ota_benchmark.currency": "AED"}
+        confidence = {}
+        provider, model = "fake", "fake"
+        contradictions = []
+
+    monkeypatch.setattr("yta.pipeline.extract_llm.extract", lambda *a, **kw: _FakeRes())
+    p = extract("", render=False, page_text="dubai hotel 500 aed please")
+    assert p.ota_benchmark.currency == "AED"   # the real extracted value, not the INR default
