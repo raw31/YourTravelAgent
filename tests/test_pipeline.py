@@ -187,6 +187,35 @@ def test_mandatory_ok_when_all_present():
     assert p.status == "ok"
 
 
+def test_room_name_is_not_mandatory():
+    # A customer who genuinely never named a room (hotel + dates +
+    # occupancy + price only) is a legitimate request shape now, not a
+    # failed extraction -- _resolve() forks on this (see test_web_resolve.py)
+    # and lists representative options instead of matching one specific
+    # room. No room_name at all should still be a complete, "ok" packet.
+    p = BookingIntent(source=Source(ota="booking", url="x"))
+    p.hotel.name = "Aloha on the Ganges"
+    p.stay.check_in, p.stay.check_out = "2026-09-21", "2026-09-22"
+    p.stay.set_occupancy([{"adults": 2, "children": 0, "child_ages": []}])
+    p.ota_benchmark.final_payable = 18160
+    assert p.requested_offer.room_name is None
+    assert p.check_mandatory() == []
+    assert p.status == "ok"
+
+
+def test_room_name_absent_and_something_else_missing_still_fails_on_that():
+    # room_name must never itself appear in missing_mandatory, in either
+    # outcome -- but a packet missing something that's still genuinely
+    # mandatory (price, here) should still fail on THAT.
+    p = BookingIntent(source=Source(ota="booking", url="x"))
+    p.hotel.name = "Aloha on the Ganges"
+    p.stay.check_in, p.stay.check_out = "2026-09-21", "2026-09-22"
+    p.stay.set_occupancy([{"adults": 2, "children": 0, "child_ages": []}])
+    missing = p.check_mandatory()
+    assert p.status == "fail"
+    assert missing == ["ota_benchmark.final_payable"]
+
+
 # -- page_data (Chrome extension capture) --------------------------
 
 def test_page_data_builds_context_and_skips_render(monkeypatch):

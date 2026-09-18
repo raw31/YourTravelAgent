@@ -2,7 +2,7 @@
 from yta.schema import Offer
 from yta.roommap import (
     map_rooms, meal_to_tj, split_name_and_view, views_match,
-    RoomNormalizationService,
+    RoomNormalizationService, OPTION_TYPES, list_by_option_type,
 )
 
 
@@ -51,9 +51,9 @@ def test_normalizer_order_and_synonyms():
 
 # -- map_rooms fixture -------------------------------------------------
 
-def _opt(rtid, name, meal, refundable, price, oid):
+def _opt(rtid, name, meal, refundable, price, oid, option_type="SRSM"):
     return {
-        "optionId": oid, "optionType": "SRSM",
+        "optionId": oid, "optionType": option_type,
         "roomInfo": [{"id": rtid, "name": name, "adults": 2, "children": 0}],
         "mealBasis": meal,
         "pricing": {"totalPrice": price, "currency": "INR"},
@@ -169,3 +169,88 @@ def test_map_rooms_accepts_supplier_options():
     assert r.matched and r.room_type_id == "R1"
     assert {ro.option_id for ro in r.rate_options} == {"o1", "o2", "o3", "o4"}
     assert r.ratekey_option_ids == ["o1"]
+
+
+# -- list_by_option_type: no requested room name --------------------------
+
+_TYPED_OPTIONS = [
+    _opt("R1", "Deluxe Villa", "Breakfast", True, 40000, "s1", "SRSM"),
+    _opt("R1", "Deluxe Villa", "Half Board", True, 45000, "s2", "SRSM"),   # more expensive SRSM
+    _opt("R1", "Deluxe Villa", "Half Board", True, 42000, "c1", "SRCM"),
+    _opt("R2", "Premier Villa", "Breakfast", True, 48000, "c2", "CRSM"),
+    _opt("R2", "Premier Villa", "Half Board", True, 55000, "c3", "CRCM"),
+]
+
+
+def test_list_by_option_type_all_four_types_present():
+    opts = _TYPED_OPTIONS + [_opt("R3", "Executive Villa", "Room Only", False, 60000, "x1", "CRCM")]
+    r = list_by_option_type(opts)
+    assert r.types_found == list(OPTION_TYPES)
+    assert r.types_missing == []
+    assert len(r.options) == 4
+    by_type = {o.option_type: o for o in r.options}
+    assert by_type["SRSM"].option_id == "s1"     # cheaper of the two SRSM rows
+    assert by_type["SRCM"].option_id == "c1"
+    assert by_type["CRSM"].option_id == "c2"
+    assert by_type["CRCM"].option_id == "c3"     # cheaper of the two CRCM rows (55000 < 60000)
+
+
+def test_list_by_option_type_some_types_missing():
+    opts = [_opt("R1", "Deluxe Villa", "Breakfast", True, 40000, "s1", "SRSM"),
+            _opt("R2", "Premier Villa", "Half Board", True, 55000, "c3", "CRCM")]
+    r = list_by_option_type(opts)
+    assert r.types_found == ["SRSM", "CRCM"]
+    assert r.types_missing == ["SRCM", "CRSM"]
+    assert [o.option_id for o in r.options] == ["s1", "c3"]
+
+
+def test_list_by_option_type_price_tie_is_deterministic():
+    opts = [_opt("R1", "Deluxe Villa", "Breakfast", True, 40000, "z9", "SRSM"),
+            _opt("R1", "Deluxe Villa", "Breakfast", True, 40000, "a1", "SRSM")]
+    r = list_by_option_type(opts)
+    assert len(r.options) == 1
+    assert r.options[0].option_id == "a1"    # lower option_id wins the tie, not input order
+    # confirm it's stable regardless of input order
+    r2 = list_by_option_type(list(reversed(opts)))
+    assert r2.options[0].option_id == "a1"
+
+
+def test_list_by_option_type_zero_options():
+    r = list_by_option_type([])
+    assert r.options == []
+    assert r.types_found == []
+    assert r.types_missing == list(OPTION_TYPES)
+    assert r.notes
+
+
+def test_list_by_option_type_excludes_unknown_or_blank_type():
+    opts = [_opt("R1", "Deluxe Villa", "Breakfast", True, 40000, "s1", "SRSM"),
+            _opt("R2", "Weird Villa", "Breakfast", True, 30000, "u1", ""),
+            _opt("R3", "Other Villa", "Breakfast", True, 20000, "u2", "XXXX")]
+    r = list_by_option_type(opts)
+    assert [o.option_id for o in r.options] == ["s1"]
+    assert any("unrecognised" in n or "blank" in n for n in r.notes)
+
+
+def test_list_by_option_type_accepts_supplier_options_too():
+    from yta.tripjack.hotel import _norm_option
+    sopts = [_norm_option(o) for o in _TYPED_OPTIONS]
+    r_raw = list_by_option_type(_TYPED_OPTIONS)
+    r_sup = list_by_option_type(sopts)
+    assert [o.option_id for o in r_raw.options] == [o.option_id for o in r_sup.options]
+
+
+def test_list_by_option_type_tags_every_result_cheapest_in_type():
+    r = list_by_option_type(_TYPED_OPTIONS)
+    assert all(o.tags == ["cheapest-in-type"] for o in r.options)
+
+
+def test_map_rooms_still_works_unmodified_after_option_type_additions():
+    # Regression: the _rows()/RateOption additions for list_by_option_type()
+    # must not perturb map_rooms()'s own bucketing/scoring/tagging.
+    off = Offer(room_name="Deluxe Villa", meal_plan="Half Board", refundable=True)
+    r = map_rooms(OPTIONS, off, use_llm=False)
+    assert r.matched and r.band == "strong" and r.room_type_id == "R1"
+    assert {ro.option_id for ro in r.rate_options} == {"o1", "o2", "o3", "o4"}
+    # every returned RateOption now also carries the option_type it came in with
+    assert all(ro.option_type == "SRSM" for ro in r.rate_options)

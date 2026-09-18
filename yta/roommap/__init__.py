@@ -8,6 +8,7 @@ room-mapping service; spec in `~/mmtroommapping.md`.
 """
 from yta.roommap.match import (
     RateOption, RoomBucket, RoomMapResult, map_rooms,
+    OPTION_TYPES, RateOptionsByType, list_by_option_type,
 )
 from yta.roommap.meal import meal_to_tj
 from yta.roommap.normalize import (
@@ -17,6 +18,7 @@ from yta.roommap.normalize import (
 
 __all__ = [
     "map_rooms", "RoomMapResult", "RoomBucket", "RateOption",
+    "OPTION_TYPES", "RateOptionsByType", "list_by_option_type",
     "meal_to_tj", "RoomNormalizationService", "split_name_and_view",
     "views_match", "CONFIG", "RoomMatchConfig",
 ]

@@ -832,36 +832,54 @@ def _resolve(packet) -> dict:
                                + (f"; {det.notes[0]}" if det.notes else "")
                                + f"  [{pms} ms]")
 
-                    # map the OTA requested offer onto a TJ ratekey
+                    # map the OTA requested offer onto a TJ ratekey -- or,
+                    # when no specific room was ever requested, list up to 4
+                    # representative options instead (nothing to match against)
                     if det.options:
-                        from yta.roommap import map_rooms
-                        rm = map_rooms(
-                            det.options, packet.requested_offer,
-                            benchmark_price=packet.ota_benchmark.final_payable,
-                            policy=packet.matching_policy, log=packet.log)
-                        rmd = rm.to_dict()
-                        b = packet.ota_benchmark
-                        rmd["our_price"] = {
-                            "final_payable": b.final_payable, "subtotal": b.subtotal,
-                            "taxes": b.taxes, "fees": b.fees, "discount": b.discount,
-                            "currency": b.currency,
-                            "room_name": packet.requested_offer.room_name,
-                            "meal_plan": packet.requested_offer.meal_plan,
-                            "cancellation": packet.requested_offer.cancellation,
-                        }
-                        d["room_map"] = rmd
                         # prebook context — used on demand by POST /api/review
                         # when the user picks an option (option ids expire, so
-                        # a fresh pricing call + re-match happens then)
+                        # a fresh pricing call + re-match happens then).
+                        # Needed for both paths below.
                         d["prebook_ctx"] = {
                             "tj_id": m.tj_id, "check_in": det.check_in,
                             "check_out": det.check_out, "rooms_query": det.rooms_query,
                             "currency": det.currency}
-                        packet.log(
-                            f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
-                            f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"
-                            + ("; LLM used" if rm.llm_used else "")
-                            + " — pick an option in the panel to prebook (Review)")
+
+                        if packet.requested_offer.room_name:
+                            # -- existing path: a specific room was requested --
+                            from yta.roommap import map_rooms
+                            rm = map_rooms(
+                                det.options, packet.requested_offer,
+                                benchmark_price=packet.ota_benchmark.final_payable,
+                                policy=packet.matching_policy, log=packet.log)
+                            rmd = rm.to_dict()
+                            b = packet.ota_benchmark
+                            rmd["our_price"] = {
+                                "final_payable": b.final_payable, "subtotal": b.subtotal,
+                                "taxes": b.taxes, "fees": b.fees, "discount": b.discount,
+                                "currency": b.currency,
+                                "room_name": packet.requested_offer.room_name,
+                                "meal_plan": packet.requested_offer.meal_plan,
+                                "cancellation": packet.requested_offer.cancellation,
+                            }
+                            d["room_map"] = rmd
+                            packet.log(
+                                f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
+                                f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"
+                                + ("; LLM used" if rm.llm_used else "")
+                                + " — pick an option in the panel to prebook (Review)")
+                        else:
+                            # -- new path: no requested room -- list up to 4
+                            #    representative options, one per optionType --
+                            from yta.roommap import list_by_option_type
+                            rbt = list_by_option_type(det.options)
+                            d["room_options"] = rbt.to_dict()
+                            packet.log(
+                                f"no requested room name — listed {len(rbt.options)} "
+                                f"representative option(s) across "
+                                f"{', '.join(rbt.types_found) or 'no'} optionType(s)"
+                                + (f" (missing: {', '.join(rbt.types_missing)})"
+                                   if rbt.types_missing else ""))
             except TripJackError as e:
                 d["detail_error"] = str(e)
                 packet.log(f"TripJack pricing error: {e}")

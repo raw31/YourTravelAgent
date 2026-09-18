@@ -65,6 +65,7 @@ class RateOption:
     refundable: bool
     total_price: float
     currency: str
+    option_type: str = ""        # SRSM/SRCM/CRSM/CRCM; "" where unknown/unset
     tags: list = field(default_factory=list)
 
     def to_dict(self):
@@ -131,6 +132,7 @@ def _rows(options) -> list[dict]:
                 "refundable": bool(o.refundable),
                 "total_price": float(o.total_price or 0),
                 "currency": o.currency or "",
+                "option_type": o.option_type or "",
             }
         else:                                            # raw pricing dict
             rooms = o.get("roomInfo") or []
@@ -141,6 +143,7 @@ def _rows(options) -> list[dict]:
                 "refundable": bool((o.get("cancellation") or {}).get("isRefundable")),
                 "total_price": float(pr.get("totalPrice") or 0),
                 "currency": pr.get("currency", "") or "",
+                "option_type": o.get("optionType", "") or "",
             }
         ids = sorted(str(r.get("id")) for r in rooms if r.get("id"))
         row["room_type_id"] = "+".join(ids) or "?"
@@ -377,7 +380,7 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
             option_id=r["option_id"], room_type_id=r["room_type_id"],
             room_name=r["room_name"], meal_basis=r["meal_basis"],
             refundable=r["refundable"], total_price=r["total_price"],
-            currency=r["currency"], tags=tags)))
+            currency=r["currency"], option_type=r.get("option_type", ""), tags=tags)))
 
     # rate-plan matches first, then by price
     rate_options.sort(key=lambda t: (not t[0], t[1].total_price))
@@ -395,6 +398,76 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
         score=chosen.score, rate_options=rate_options, ranked_buckets=scored,
         meal_filter=req_meal, refundable_filter=req_ref, view_flag=view_flag,
         llm_used=llm_used, notes=notes, ratekey_option_ids=ratekey_ids)
+
+
+# -- no-requested-room path: list up to 4 representative options ---------
+
+# TripJack's real optionType codes, in the fixed display/selection order.
+OPTION_TYPES = ("SRSM", "SRCM", "CRSM", "CRCM")
+
+
+@dataclass
+class RateOptionsByType:
+    """Result of list_by_option_type() — the no-requested-room path.
+    `options` holds 0-4 RateOption, at most one per OPTION_TYPES entry,
+    ordered SRSM, SRCM, CRSM, CRCM (skipping any type TripJack returned none
+    of — this is 'up to 4', never padded, never fabricated)."""
+    options: list                    # list[RateOption]
+    types_found: list                # e.g. ["SRSM", "CRCM"]
+    types_missing: list              # e.g. ["SRCM", "CRSM"]
+    notes: list = field(default_factory=list)
+
+    def to_dict(self):
+        d = asdict(self)
+        d["options"] = [o.to_dict() if isinstance(o, RateOption) else o
+                        for o in self.options]
+        return d
+
+
+def list_by_option_type(options) -> RateOptionsByType:
+    """Entry point for the no-requested-room-name case. `options`: TJ pricing
+    options (raw dicts or SupplierOption list — same input shape map_rooms()
+    accepts). Groups by optionType and returns the cheapest option within
+    each of the (up to) 4 real TripJack optionType codes. No matching, no
+    scoring, no LLM — there is nothing to match against."""
+    rows = _rows(options)
+    if not rows:
+        return RateOptionsByType([], [], list(OPTION_TYPES),
+                                 ["TripJack returned no options to list"])
+
+    by_type: dict = {}
+    unknown = 0
+    for r in rows:
+        t = r.get("option_type") or ""
+        if t not in OPTION_TYPES:
+            unknown += 1
+            continue
+        by_type.setdefault(t, []).append(r)
+
+    out, found, missing = [], [], []
+    for t in OPTION_TYPES:
+        rows_t = by_type.get(t)
+        if not rows_t:
+            missing.append(t)
+            continue
+        found.append(t)
+        # deterministic tie-break: cheapest, then lowest option_id string
+        cheapest = min(rows_t, key=lambda r: (r["total_price"], r["option_id"]))
+        out.append(RateOption(
+            option_id=cheapest["option_id"], room_type_id=cheapest["room_type_id"],
+            room_name=cheapest["room_name"], meal_basis=cheapest["meal_basis"],
+            refundable=cheapest["refundable"], total_price=cheapest["total_price"],
+            currency=cheapest["currency"], option_type=t, tags=["cheapest-in-type"]))
+
+    notes = [f"{len(rows)} option(s) -> {len(found)}/{len(OPTION_TYPES)} "
+             f"optionType(s) represented"]
+    if missing:
+        notes.append(f"TripJack returned no {', '.join(missing)} option "
+                     f"for this hotel/stay/occupancy")
+    if unknown:
+        notes.append(f"{unknown} option(s) had an unrecognised/blank "
+                     f"optionType — excluded")
+    return RateOptionsByType(out, found, missing, notes)
 
 
 def _dump_buckets(buckets_rows, svc) -> list:

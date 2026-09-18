@@ -163,7 +163,15 @@ MANDATORY_FIELDS = (
     ("stay.check_out",               lambda p: p.stay.check_out),
     ("stay.rooms",                   lambda p: p.stay.rooms),
     ("stay.occupancy",               lambda p: bool(p.stay.occupancy)),
-    ("requested_offer.room_name",    lambda p: p.requested_offer.room_name),
+    # requested_offer.room_name deliberately NOT mandatory (moved out
+    # 2026-09) — a customer who genuinely never named a room (hotel +
+    # dates + occupancy only) is a legitimate request shape, not a failed
+    # extraction: _resolve() forks on its presence and lists up to 4
+    # representative options (yta.roommap.list_by_option_type()) instead
+    # of matching one specific room (yta.roommap.map_rooms()) when it's
+    # absent. Same reasoning as room_detail below — the real gate for
+    # room-matching lives in roommap/match.py, not here.
+    #
     # room_detail (description/bed_type/view) deliberately NOT mandatory —
     # confirmed unused for anything essential downstream: TripJack's
     # pricing call needs only hid/dates/occupancy/currency, and room
