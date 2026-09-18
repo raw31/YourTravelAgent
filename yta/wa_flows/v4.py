@@ -127,7 +127,23 @@ import re
 import threading
 import time
 
-from yta.wa_shared import occ_repr, wa_send
+from yta.wa_shared import (
+    occ_repr, wa_send,
+    CHECKING_PHRASES as _CHECKING_PHRASES,
+    FETCHING_PHRASES as _FETCHING_PHRASES,
+    FOUND_OPENERS as _FOUND_OPENERS,
+    NATURAL_QUESTIONS as _NATURAL_QUESTIONS,
+    NATURAL_NOUNS as _NATURAL_NOUNS,
+    short_date as _short_date,
+    clean_room_name as _clean_room_name,
+    price_comparison_lines as _price_comparison_lines,
+    price_line as _price_line,
+    recap_block as _recap_block,
+    closing_question as _closing_question,
+    found_and_ask_message as _found_and_ask_message,
+    deal_recap_block as _deal_recap_block,
+    deal_message as _deal_message,
+)
 
 _WA_SESSIONS: dict = {}
 _WA_SESSIONS_LOCK = threading.Lock()
@@ -201,51 +217,6 @@ _ONBOARDING_TEXT = (
     "to book through me."
 )
 
-# Rotated rather than fixed so the same customer never sees the exact
-# same script twice in a row -- one of the concrete things that made the
-# old version read as a bot no matter how the individual words changed.
-_CHECKING_PHRASES = [
-    "Let me take a look for you.",
-    "One moment, I'll check this now.",
-    "Leave this with me for a moment.",
-]
-_FETCHING_PHRASES = [
-    "One moment, I'll get you the best rate I can find.",
-    "Let me check what I can secure for you.",
-    "Give me just a moment to pull the best rate.",
-]
-_FOUND_OPENERS = [
-    "Here's what I have for your stay — just need a bit more to compare it properly.",
-    "Almost there — just need a little more to compare this properly.",
-    "Just about set — one more thing and I can compare this properly.",
-]
-
-# A real question a person would ask, not the internal field label recited
-# back ("Total Price Shown on the Page") -- see extract_llm.FIELD_LABELS
-# for the label form this deliberately avoids using here.
-_NATURAL_QUESTIONS = {
-    "hotel.name": "Which hotel is this?",
-    "stay.check_in": "What are your check-in and check-out dates?",
-    "stay.check_out": "What are your check-in and check-out dates?",
-    "stay.rooms": "How many rooms, and how many guests in each?",
-    "stay.occupancy": "How many rooms, and how many guests in each?",
-    "requested_offer.room_name": "What room type did you pick?",
-    "ota_benchmark.final_payable": "What's the total price shown on the page?",
-}
-# Short noun phrases for weaving several missing fields into one sentence
-# ("I still need the room type and the total price...") rather than a
-# bulleted "Missing:" dump.
-_NATURAL_NOUNS = {
-    "hotel.name": "the hotel",
-    "stay.check_in": "your dates",
-    "stay.check_out": "your dates",
-    "stay.rooms": "how many guests",
-    "stay.occupancy": "how many guests",
-    "requested_offer.room_name": "the room type",
-    "ota_benchmark.final_payable": "the total price",
-}
-
-
 def _text_of(items: list) -> str:
     return " ".join((m.get("text") or "") for m in items).strip()
 
@@ -288,46 +259,6 @@ def _download_media(items: list):
     return load_uploads(media_items) if media_items else None
 
 
-def _short_date(iso_str):
-    from datetime import date
-    try:
-        y, m, d = (int(x) for x in iso_str.split("-"))
-        return date(y, m, d).strftime("%b %-d")
-    except Exception:
-        return iso_str
-
-
-def _clean_room_name(name):
-    """Room names come straight from the OTA page or TripJack's own
-    catalog, unedited -- "DELUXE ROOM" (shouting caps) and "Deluxe Room."
-    (a stray trailing period) both showed up verbatim in live testing.
-    Strip the obviously-wrong bits without rewriting a name that already
-    has deliberate mixed case."""
-    if not name:
-        return name
-    name = name.strip().rstrip(".").strip()
-    if name.isupper():
-        name = name.title()
-    return name
-
-
-def _price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct) -> str:
-    """Two failed approaches taught the same lesson: don't try to align
-    price labels into columns at all. Hand-padded spaces don't align in
-    WhatsApp's proportional font; a ```monospace``` block DOES align, but
-    the padding needed to line up "BookMyStay price:" makes the line
-    wider than a phone screen, so WhatsApp wraps it mid-value ("INR" on
-    one line, the number on the next) -- worse than the original
-    misalignment. A "was -> now" line has nothing to align and is short
-    enough to never wrap."""
-    return (f"~{ota_ccy} {ota_price:,.0f}~ → *{ccy} {sell:,.2f}*\n"
-            f"You save *{ccy} {diff:,.0f}* ({dpct:.0f}%)")
-
-
-def _price_line(ccy, sell) -> str:
-    return f"BookMyStay price: *{ccy} {sell:,.2f}*"
-
-
 def _referral_share_messages(booking_ref: str) -> tuple:
     """Returns (ask_text, shareable_text) as two SEPARATE messages, not
     one -- WhatsApp's forward action grabs the whole message bubble, so
@@ -367,180 +298,6 @@ def _referral_share_messages(booking_ref: str) -> tuple:
            "*Forward* or *Share to Status*.")
     shareable = f"I just found a better hotel rate through BookMyStay — check yours here: {link}"
     return ask, shareable
-
-
-def _recap_block(packet) -> str:
-    """The facts a customer would actually want to verify, as a clean
-    labeled block -- kept structured on purpose even though the messages
-    around it are conversational. See the module docstring: dissolving
-    this into prose was tried and rejected as harder to scan.
-
-    One icon per CATEGORY of fact (hotel / dates+guests / room / price),
-    never one per individual field -- the middle ground picked after
-    trying both zero icons and one on every line. Keep this exact set
-    (🏨 📅 🛏️ 💰) and placement in sync with _deal_recap_block() and
-    _deal_message() below -- same visual language everywhere a
-    structured fact block appears."""
-    lines = []
-    if packet.hotel.name:
-        lines.append(f"🏨 *{packet.hotel.name}*")
-    date_occ = []
-    if packet.stay.check_in and packet.stay.check_out:
-        date_occ.append(f"{_short_date(packet.stay.check_in)} → {_short_date(packet.stay.check_out)}")
-    if packet.stay.occupancy:
-        date_occ.append(occ_repr(packet.stay.occupancy))
-    if date_occ:
-        lines.append("📅 " + " · ".join(date_occ))
-    room_bits = []
-    room_name = _clean_room_name(packet.requested_offer.room_name)
-    if room_name:
-        room_bits.append(room_name)
-    if packet.requested_offer.meal_plan:
-        room_bits.append(packet.requested_offer.meal_plan)
-    if packet.requested_offer.refundable is True:
-        room_bits.append("Refundable")
-    elif packet.requested_offer.refundable is False:
-        room_bits.append("Non-refundable")
-    if room_bits:
-        lines.append("🛏️ " + " · ".join(room_bits))
-    if packet.ota_benchmark.final_payable:
-        ccy = (packet.ota_benchmark.currency or "").strip()
-        lines.append(f"💰 Price shown: {ccy} {packet.ota_benchmark.final_payable:,.0f}".replace("  ", " "))
-    return "\n".join(lines)
-
-
-def _closing_question(missing: list, clarify: str | None = None) -> str:
-    if clarify:
-        return clarify
-    if len(missing) == 1:
-        return _NATURAL_QUESTIONS.get(missing[0], "Could you share a bit more detail?")
-    nouns = []
-    for m in missing:
-        n = _NATURAL_NOUNS.get(m)
-        if n and n not in nouns:
-            nouns.append(n)
-    if not nouns:
-        return "Could you share a bit more detail, or send a fuller screenshot?"
-    if len(nouns) == 1:
-        joined = nouns[0]
-    elif len(nouns) == 2:
-        joined = f"{nouns[0]} and {nouns[1]}"
-    else:
-        joined = ", ".join(nouns[:-1]) + f", and {nouns[-1]}"
-    return f"I still need {joined} to finish comparing — send those, or a fuller screenshot?"
-
-
-def _found_and_ask_message(packet, missing: list, clarify: str | None = None) -> str:
-    question = _closing_question(missing, clarify)
-    recap = _recap_block(packet)
-    if not recap:
-        return f"I wasn't able to pick up much from that screenshot — {question}"
-    return f"{random.choice(_FOUND_OPENERS)}\n\n{recap}\n\n{question}"
-
-
-def _deal_recap_block(packet, best: dict) -> str:
-    """Same shape as _recap_block(), but for the actual offer being
-    quoted -- room/meal/refundable come from the matched TripJack option
-    when available (it can word these slightly differently than what the
-    OTA page showed), falling back to the customer's original request
-    only where TripJack didn't return its own value. Dates/occupancy
-    don't change between what was asked and what's being offered, so
-    those still come straight from the packet."""
-    lines = []
-    if packet.hotel.name:
-        lines.append(f"🏨 *{packet.hotel.name}*")
-    date_occ = []
-    if packet.stay.check_in and packet.stay.check_out:
-        date_occ.append(f"{_short_date(packet.stay.check_in)} → {_short_date(packet.stay.check_out)}")
-    if packet.stay.occupancy:
-        date_occ.append(occ_repr(packet.stay.occupancy))
-    if date_occ:
-        lines.append("📅 " + " · ".join(date_occ))
-    room_bits = []
-    room_name = _clean_room_name(best.get("room_name") or packet.requested_offer.room_name)
-    if room_name:
-        room_bits.append(room_name)
-    meal = best.get("meal_basis") or packet.requested_offer.meal_plan
-    if meal:
-        room_bits.append(meal)
-    refundable = best.get("refundable")
-    if refundable is None:
-        refundable = packet.requested_offer.refundable
-    if refundable is True:
-        room_bits.append("Refundable")
-    elif refundable is False:
-        room_bits.append("Non-refundable")
-    if room_bits:
-        lines.append("🛏️ " + " · ".join(room_bits))
-    return "\n".join(lines)
-
-
-def _deal_message(packet, resolution) -> tuple:
-    """Returns (text, matched, bookable, savings_line, confirm_line).
-    `matched`: a room/rate was actually found at all. `bookable`: there's
-    a genuine offer worth confirming -- matched AND (not directly
-    comparable to the OTA price, or it's actually cheaper). A matched
-    rate that ISN'T cheaper gets a plain "nothing better to offer" reply
-    with no confirm/decline buttons -- there's nothing to confirm --
-    mirroring wa_shared.whatsapp_reply()'s own gate (v2/v3 build their own
-    message text/structure here rather than reusing that function, but
-    keep the same underlying business logic). `savings_line` is a short
-    standalone sentence naming the actual amount saved, for the referral
-    ask after a confirm. `confirm_line` continues directly after
-    "Wonderful — " in the confirm message ("I've secured X for Y (Z less
-    than what you had)."), so the confirmation itself names what was
-    actually booked instead of a bare "I've noted this down." Both are
-    only set when there's a real offer; None otherwise (bookable-but-not-
-    comparable only sets confirm_line, not savings_line -- nothing to
-    compare against; no rate at all sets neither)."""
-    import os
-
-    rz = resolution or {}
-    room_map = rz.get("room_map") or {}
-    best = None
-    if room_map.get("matched"):
-        opts = room_map.get("rate_options") or []
-        keyed = set(room_map.get("ratekey_option_ids") or [])
-        pool = [o for o in opts if o.get("option_id") in keyed] or opts
-        if pool:
-            best = min(pool, key=lambda o: o.get("total_price", float("inf")))
-
-    if not best:
-        name = packet.hotel.name or "this hotel"
-        return (f"I wasn't able to find a better live rate for {name} at the moment. "
-                f"Happy to take a look at another property, if you'd like?"), False, False, None, None
-
-    ota_price = packet.ota_benchmark.final_payable
-    ota_ccy = packet.ota_benchmark.currency
-    pct = float(os.environ.get("WHATSAPP_MARKUP_PCT", "0") or 0)
-    flat = float(os.environ.get("WHATSAPP_MARKUP_FLAT", "0") or 0)
-    ccy = best.get("currency", "") or ""
-    sell = round(best.get("total_price", 0) * (1 + pct / 100) + flat, 2)
-    comparable = bool(ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
-    hotel_name = packet.hotel.name or "this hotel"
-
-    if comparable and (ota_price - sell) < 0:
-        return ("I checked, but the price you already have looks like the best "
-                 "deal for this stay — nothing better to offer right now."), True, False, None, None
-
-    recap = _deal_recap_block(packet, best)
-    savings_line = None
-
-    lines = ["*Good news — I found you a better rate.*", "", recap, "", "💰"]
-    if comparable:
-        diff = ota_price - sell
-        dpct = (diff / ota_price * 100) if ota_price else 0
-        lines.append(_price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct))
-        savings_line = f"You just saved {ccy} {diff:,.0f} ({dpct:.0f}%) on this one."
-        confirm_line = (f"I've secured {hotel_name} for {ccy} {sell:,.2f} "
-                         f"({ccy} {diff:,.0f} less than what you had).")
-    else:
-        lines[0] = "*Good news — I found you a rate.*"
-        lines.append(_price_line(ccy, sell))
-        confirm_line = f"I've secured {hotel_name} for {ccy} {sell:,.2f}."
-    lines.append("")
-    lines.append("Shall I go ahead and secure this for you?")
-    return "\n".join(lines), True, True, savings_line, confirm_line
 
 
 def _present_deal(frm: str, packet) -> None:
