@@ -340,6 +340,17 @@ def extract(context: str | None = None, url: str = "",
     raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
     data = json.loads(raw)   # let a bad parse raise — caller handles
 
+    # The prompt asks for "a single JSON object" but the model occasionally
+    # wraps its answer in a list instead (seen live on informal/mixed-
+    # language free text, e.g. a message that embeds a direct question
+    # alongside the booking details) -- every .get()/_dig() call below
+    # assumes a dict, so normalize rather than crash on a schema-shape
+    # miss that isn't actually a parse failure.
+    if isinstance(data, list):
+        data = next((d for d in data if isinstance(d, dict)), {})
+    if not isinstance(data, dict):
+        data = {}
+
     conf_in = data.get("field_confidence", {}) or {}
     fields, confidence = {}, {}
     for path in _FIELDS:
