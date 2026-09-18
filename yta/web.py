@@ -869,17 +869,17 @@ def _resolve(packet) -> dict:
                                 + ("; LLM used" if rm.llm_used else "")
                                 + " — pick an option in the panel to prebook (Review)")
                         else:
-                            # -- new path: no requested room -- list up to 4
-                            #    representative options, one per optionType --
-                            from yta.roommap import list_by_option_type
-                            rbt = list_by_option_type(det.options)
-                            d["room_options"] = rbt.to_dict()
+                            # -- new path: no requested room -- anchor on the
+                            #    cheapest option overall, list up to 4 meal x
+                            #    refundability variants of that SAME room --
+                            from yta.roommap import list_cheapest_room_variants
+                            rv = list_cheapest_room_variants(det.options)
+                            d["room_options"] = rv.to_dict()
                             packet.log(
-                                f"no requested room name — listed {len(rbt.options)} "
-                                f"representative option(s) across "
-                                f"{', '.join(rbt.types_found) or 'no'} optionType(s)"
-                                + (f" (missing: {', '.join(rbt.types_missing)})"
-                                   if rbt.types_missing else ""))
+                                f"no requested room name — cheapest room is "
+                                f"{rv.room_name!r} (room_type_id {rv.room_type_id}); "
+                                f"showing {len(rv.options)} of {rv.total_combos} "
+                                f"meal/refundability combo(s)")
             except TripJackError as e:
                 d["detail_error"] = str(e)
                 packet.log(f"TripJack pricing error: {e}")

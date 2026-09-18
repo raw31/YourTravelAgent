@@ -1,5 +1,5 @@
 """yta.web._resolve() — the fork between the existing single-room
-map_rooms() path and the new list_by_option_type() path (no requested
+map_rooms() path and the list_cheapest_room_variants() path (no requested
 room name). No network: yta.hoteldb.db.db_path, yta.hoteldb.link.resolve_packet,
 yta.tripjack.client.TripJackClient.from_env, and yta.tripjack.hotel.hotel_options
 are all faked.
@@ -97,15 +97,19 @@ def _wire_common_mocks(monkeypatch, options):
                          lambda *a, **kw: _FakeDetail(options))
 
 
-def test_no_room_name_routes_to_list_by_option_type(monkeypatch):
+def test_no_room_name_routes_to_list_cheapest_room_variants(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     d = _resolve(_packet(room_name=None))
     assert "room_map" not in d
     assert "room_options" in d
     ro = d["room_options"]
-    assert ro["types_found"] == ["SRSM", "SRCM", "CRSM"]
-    assert ro["types_missing"] == ["CRCM"]
-    assert [o["option_id"] for o in ro["options"]] == ["s1", "c1", "c2"]
+    # anchors on the cheapest option overall (s1, room R1), then lists
+    # THAT room's own meal x refundability variants -- c2 (room R2) is a
+    # different room entirely and must not leak in.
+    assert ro["room_type_id"] == "R1"
+    assert ro["room_name"] == "Deluxe Room"
+    assert ro["total_combos"] == 2
+    assert [o["option_id"] for o in ro["options"]] == ["s1", "c1"]
 
 
 def test_room_name_present_is_completely_unaffected(monkeypatch):
@@ -140,5 +144,5 @@ def test_no_room_name_path_logs_a_summary_line(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     pkt = _packet(room_name=None)
     _resolve(pkt)
-    assert any("no requested room name — listed 3" in l["msg"] for l in pkt.run_log)
-    assert any("CRCM" in l["msg"] for l in pkt.run_log)   # missing type surfaced in the log
+    assert any("no requested room name" in l["msg"] and "Deluxe Room" in l["msg"]
+               for l in pkt.run_log)

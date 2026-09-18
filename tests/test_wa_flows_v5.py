@@ -737,21 +737,29 @@ def test_search_hotel_path_proceeds_without_a_price(sent, monkeypatch):
     assert any("here's what's available" in m[1].lower() for m in sent if m[0] == "text")
 
 
-def test_present_option_choices_lists_all_options_with_tripjack_hotel_name(sent):
+def test_present_option_choices_shows_room_once_then_meal_x_refund_variants(sent):
+    # All options here are variants of the SAME (cheapest) room -- the
+    # room name shows once at the top, not repeated per line.
     options = [
-        {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
-         "refundable": True, "currency": "INR", "total_price": 20000.0},
-        {"option_id": "c2", "room_name": "Premier Room", "meal_basis": "Half Board",
-         "refundable": False, "currency": "INR", "total_price": 25000.0},
+        {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Room Only",
+         "refundable": False, "currency": "INR", "total_price": 20000.0},
+        {"option_id": "s2", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
+         "refundable": False, "currency": "INR", "total_price": 21000.0},
+        {"option_id": "s3", "room_name": "Deluxe Room", "meal_basis": "Room Only",
+         "refundable": True, "currency": "INR", "total_price": 22000.0},
     ]
     resolution = {"detail": {"hotel_name": "Taj Santacruz"},
-                  "room_options": {"options": options}}
+                  "room_options": {"room_type_id": "R1", "room_name": "Deluxe Room",
+                                    "options": options}}
     v5._present_option_choices("cust", _Packet(), resolution)
     text = next(m[1] for m in sent if m[0] == "text")
     assert "Taj Santacruz" in text
-    assert "1️⃣" in text and "2️⃣" in text and "3️⃣" not in text
-    assert "Deluxe Room" in text and "20,000.00" in text
-    assert "Premier Room" in text and "Non-refundable" in text
+    assert "1️⃣" in text and "2️⃣" in text and "3️⃣" in text and "4️⃣" not in text
+    # room name appears exactly once (the 🛏️ line), not per numbered line
+    assert text.count("Deluxe Room") == 1
+    assert "Room Only" in text and "Breakfast" in text
+    assert "Non-refundable" in text and "Refundable" in text
+    assert "20,000.00" in text and "21,000.00" in text and "22,000.00" in text
     assert v5._WA_SESSIONS["cust"]["options"] == options
 
 

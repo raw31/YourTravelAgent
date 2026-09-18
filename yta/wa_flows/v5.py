@@ -32,10 +32,13 @@ What v5 adds on top:
      single-room deal and a no-room submission on its own.
   11. When _resolve() comes back with `room_options` (no room was ever
      requested) instead of `room_map`, _present_deal hands off to
-     _present_option_choices -- a numbered text list of up to 4 rate
-     options (TripJack's own hotel name/room name, same as the single-
-     room deal card), one per available optionType, with a new
-     "choosing_option" session state. A numeric reply maps to the picked
+     _present_option_choices -- a numbered text list of up to 4 meal x
+     refundability variants of the single CHEAPEST room TripJack returned
+     (yta.roommap.list_cheapest_room_variants() -- grouping by TripJack's
+     own optionType turned out not to reliably diversify: a real 90-option
+     response for one hotel was 100% SRSM), shown once at the top since
+     every option is the same room, with a new "choosing_option" session
+     state. A numeric reply maps to the picked
      RateOption, which is repackaged into a synthetic single-option
      `room_map` and handed to the SAME `_send_deal_result()` the single-
      room path already uses -- so confirm/decline, lead recording, and
@@ -411,17 +414,20 @@ def _send_deal_result(frm: str, packet, resolution: dict | None) -> None:
 
 
 def _present_option_choices(frm: str, packet, resolution: dict) -> None:
-    """The no-requested-room path: resolution["room_options"] names up to
-    4 representative rate options (yta.roommap.list_by_option_type()), one
-    per TripJack optionType -- nothing was matched/ranked against a
-    specific request, so there's no single "best" to lead with. Shows them
-    as a numbered text list (WhatsApp's reply buttons cap at 3, and this
+    """The no-requested-room path: resolution["room_options"]
+    (yta.roommap.list_cheapest_room_variants()) anchors on the single
+    cheapest option TripJack returned across the whole hotel, then names
+    up to 4 meal x refundability variants of THAT SAME room -- so unlike
+    the single-room deal card, every option here shares one room, shown
+    ONCE at the top rather than repeated on every line. Shows them as a
+    numbered text list (WhatsApp's reply buttons cap at 3, and this
     codebase has no list-message support to show up to 4 as tappable rows)
     and opens a "choosing_option" session for the numeric reply."""
     from yta import whatsapp
 
     rz = resolution or {}
-    options = ((rz.get("room_options") or {}).get("options")) or []
+    rv = rz.get("room_options") or {}
+    options = rv.get("options") or []
     hotel_name = (rz.get("detail") or {}).get("hotel_name") \
         or (rz.get("match") or {}).get("hotel_name") \
         or packet.hotel.name or "this hotel"
@@ -434,6 +440,7 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         print(f"[wa v5] batch for {frm} complete (no room_options available)", flush=True)
         return
 
+    room_name = _clean_room_name(rv.get("room_name")) or "Room"
     lines = [f"🏨 *{hotel_name}*"]
     date_occ = []
     if packet.stay.check_in and packet.stay.check_out:
@@ -442,13 +449,12 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         date_occ.append(occ_repr(packet.stay.occupancy))
     if date_occ:
         lines.append("📅 " + " · ".join(date_occ))
+    lines.append(f"🛏️ {room_name}")
     lines += ["", "Here's what's available:", ""]
 
     numerals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
     for i, opt in enumerate(options):
-        bits = [_clean_room_name(opt.get("room_name")) or "Room"]
-        if opt.get("meal_basis"):
-            bits.append(opt["meal_basis"])
+        bits = [opt.get("meal_basis") or "Room Only"]
         if opt.get("refundable") is True:
             bits.append("Refundable")
         elif opt.get("refundable") is False:
