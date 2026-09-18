@@ -453,6 +453,67 @@ def test_cheaper_rate_shows_structured_savings_and_confirm_buttons(sent, monkeyp
     assert "cust" in v4._WA_SESSIONS and v4._WA_SESSIONS["cust"]["state"] == "presented"
 
 
+def test_deal_card_uses_tripjacks_own_hotel_name_not_the_customers_typed_one(sent, monkeypatch):
+    # Regression, live: a customer typed "Taj sanracruz" and the deal card
+    # echoed that misspelling back verbatim instead of showing TripJack's
+    # own record ("Taj Santacruz") from the Detail/Pricing response it had
+    # just called. Once a live rate exists, TripJack's own name is what's
+    # actually being booked -- that's what should show, not the customer's
+    # typo. `detail.hotel_name` (the live pricing response) wins even over
+    # `Test Hotel` from the packet itself.
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {
+            "detail": {"hotel_name": "Taj Santacruz"},
+            "room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+                {"option_id": "o1", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
+                 "refundable": True, "currency": "INR", "total_price": 28015.64},
+            ]},
+        },
+    )
+    v4._present_deal("cust", _Packet())
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "Taj Santacruz" in body
+    assert "Test Hotel" not in body
+
+
+def test_deal_card_falls_back_to_hoteldb_match_name_when_no_live_detail(sent, monkeypatch):
+    # `match.hotel_name` (the earlier hotel-id resolution step, against
+    # TripJack's own catalog) is the second-best TripJack source, used only
+    # when the live pricing response didn't carry its own hotelName.
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {
+            "match": {"hotel_name": "Taj Santacruz (Catalog)"},
+            "room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+                {"option_id": "o1", "room_name": "Deluxe Room", "currency": "INR", "total_price": 28015.64},
+            ]},
+        },
+    )
+    v4._present_deal("cust", _Packet())
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "Taj Santacruz (Catalog)" in body
+    assert "Test Hotel" not in body
+
+
+def test_deal_card_room_name_never_falls_back_to_the_customers_requested_room(sent, monkeypatch):
+    # room_name/meal/refundable in the deal card must come strictly from
+    # the matched TripJack option -- never backfilled from what the
+    # customer originally asked for, even if TripJack's own field for one
+    # of them happens to be empty.
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {"room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+            {"option_id": "o1", "room_name": "", "meal_basis": "", "refundable": None,
+             "currency": "INR", "total_price": 28015.64},
+        ]}},
+    )
+    v4._present_deal("cust", _Packet())
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "Deluxe Room" not in body   # _Packet()'s requested_offer.room_name -- must not leak in
+    assert "🛏️" not in body            # nothing TripJack-sourced to show -- the line is omitted, not backfilled
+
+
 def test_matched_but_not_cheaper_gets_no_confirm_buttons(sent, monkeypatch):
     # A real bug in the first cut of this: a matched rate that ISN'T
     # actually cheaper still showed "Yes, book this" -- there's nothing to

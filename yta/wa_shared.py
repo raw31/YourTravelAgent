@@ -383,17 +383,23 @@ def found_and_ask_message(packet, missing: list, clarify: str | None = None) -> 
     return f"{random.choice(FOUND_OPENERS)}\n\n{recap}\n\n{question}"
 
 
-def deal_recap_block(packet, best: dict) -> str:
+def deal_recap_block(packet, best: dict, *, hotel_name: str | None = None) -> str:
     """Same shape as recap_block(), but for the actual offer being
-    quoted -- room/meal/refundable come from the matched TripJack option
-    when available (it can word these slightly differently than what the
-    OTA page showed), falling back to the customer's original request
-    only where TripJack didn't return its own value. Dates/occupancy
-    don't change between what was asked and what's being offered, so
-    those still come straight from the packet."""
+    quoted -- hotel name, room, meal, and refundable all come STRICTLY
+    from TripJack's own Detail/Pricing response (`hotel_name` here, and
+    `best["room_name"]`/`best["meal_basis"]`/`best["refundable"]` from the
+    matched option) -- never the OTA/customer's own wording, which can be
+    a typo or an informal shorthand ("Taj sanracruz" for "Taj Santacruz").
+    Once a live rate exists, TripJack's own record is what's actually
+    being booked, so it's the only source this block draws from; a field
+    TripJack didn't return is simply omitted, not backfilled from the
+    packet. Dates/occupancy are the one exception -- those don't change
+    between what was asked and what's being offered, so they still come
+    straight from the packet."""
     lines = []
-    if packet.hotel.name:
-        lines.append(f"🏨 *{packet.hotel.name}*")
+    name = hotel_name or packet.hotel.name
+    if name:
+        lines.append(f"🏨 *{name}*")
     date_occ = []
     if packet.stay.check_in and packet.stay.check_out:
         date_occ.append(f"{short_date(packet.stay.check_in)} → {short_date(packet.stay.check_out)}")
@@ -402,15 +408,13 @@ def deal_recap_block(packet, best: dict) -> str:
     if date_occ:
         lines.append("📅 " + " · ".join(date_occ))
     room_bits = []
-    room_name = clean_room_name(best.get("room_name") or packet.requested_offer.room_name)
+    room_name = clean_room_name(best.get("room_name"))
     if room_name:
         room_bits.append(room_name)
-    meal = best.get("meal_basis") or packet.requested_offer.meal_plan
+    meal = best.get("meal_basis")
     if meal:
         room_bits.append(meal)
     refundable = best.get("refundable")
-    if refundable is None:
-        refundable = packet.requested_offer.refundable
     if refundable is True:
         room_bits.append("Refundable")
     elif refundable is False:
@@ -459,13 +463,20 @@ def deal_message(packet, resolution) -> tuple:
     ccy = best.get("currency", "") or ""
     sell = round(best.get("total_price", 0) * (1 + pct / 100) + flat, 2)
     comparable = bool(ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
-    hotel_name = packet.hotel.name or "this hotel"
+    # TripJack's own name for the hotel (from the live Detail/Pricing
+    # response, or the earlier hotel-id match against its catalog) --
+    # never the OTA/customer's own wording once a live rate exists to
+    # book. Falls back to the packet's name only in the practically-
+    # impossible case a rate matched with neither TripJack source present.
+    hotel_name = (rz.get("detail") or {}).get("hotel_name") \
+        or (rz.get("match") or {}).get("hotel_name") \
+        or packet.hotel.name or "this hotel"
 
     if comparable and (ota_price - sell) < 0:
         return ("I checked, but the price you already have looks like the best "
                  "deal for this stay — nothing better to offer right now."), True, False, None, None
 
-    recap = deal_recap_block(packet, best)
+    recap = deal_recap_block(packet, best, hotel_name=hotel_name)
     savings_line = None
 
     lines = ["*Good news — I found you a better rate.*", "", recap, "", "💰"]
