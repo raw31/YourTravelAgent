@@ -108,6 +108,28 @@ def test_llm_context_no_xhr_is_fine():
     assert "hello world" in ctx
 
 
+def test_llm_context_ignores_a_browser_error_page_as_final_url():
+    # Real gap found live: a failed navigation still leaves final_url set
+    # to Playwright's own page.url (e.g. "chrome-error://chromewebdata/"
+    # after a net::ERR_HTTP2_PROTOCOL_ERROR) -- that used to win over
+    # `url` in the "PAGE URL:" line fed to the LLM, discarding a
+    # deep-link-resolved URL's real query params (hotelId, dates,
+    # occupancy) for a useless browser-internal scheme carrying nothing.
+    rr = RenderResult(url="https://www.makemytrip.com/hotels/hotel-details?hotelId=123",
+                      final_url="chrome-error://chromewebdata/", text="")
+    ctx = rr.llm_context()
+    assert "PAGE URL: https://www.makemytrip.com/hotels/hotel-details?hotelId=123" in ctx
+    assert "chrome-error" not in ctx
+
+
+def test_llm_context_uses_a_real_final_url_when_navigation_succeeded():
+    rr = RenderResult(url="https://short.link/x",
+                      final_url="https://www.makemytrip.com/hotels/hotel-details?hotelId=123",
+                      text="hello")
+    ctx = rr.llm_context()
+    assert "PAGE URL: https://www.makemytrip.com/hotels/hotel-details?hotelId=123" in ctx
+
+
 def test_json_digest_request_payload_tagged_and_first():
     xhr = [
         {"url": "https://ota/api/detail", "kind": "response",

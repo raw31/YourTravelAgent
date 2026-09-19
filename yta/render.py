@@ -56,7 +56,16 @@ class RenderResult:
 
     def llm_context(self, max_text: int = 7000, max_json: int = 2500,
                     max_digest: int = 9000) -> str:
-        parts = [f"PAGE URL: {self.final_url or self.url}", "",
+        # A failed navigation still leaves final_url set (Playwright's own
+        # page.url after the exception, e.g. "chrome-error://chromewebdata/")
+        # -- that's worse than useless here, since it displaces `url` (which
+        # DOES carry any deep-link resolution -- see
+        # _resolve_deferred_deeplink -- and its real query params) with a
+        # browser-internal scheme carrying zero booking information.
+        page_url = self.final_url
+        if not page_url or page_url.startswith(("chrome-error:", "about:", "data:")):
+            page_url = self.url
+        parts = [f"PAGE URL: {page_url}", "",
                  "RENDERED PAGE TEXT (booking-relevant excerpt):",
                  focus(self.text, max_text)]
         if self.json_ld:
