@@ -314,6 +314,48 @@ def _default_xhr_keep(page_netloc: str) -> Callable[[str], bool]:
     return keep
 
 
+def _resolve_deferred_deeplink(url: str, *, timeout: float = 6.0) -> str:
+    """App-share links (AppsFlyer "OneLink", e.g. the app.mmyt.co links
+    MakeMyTrip's own app generates from its Share button) redirect
+    straight to an app-store listing when there's no real device/app
+    context to open the app in -- exactly what headless Playwright hits.
+    Found live: MMT's own share link threw a raw Playwright navigation
+    error partway through the redirect chain (one hop tries to redirect
+    to a custom `mmyt://` app URI, which a browser can't navigate to at
+    all) -- rendering 0 content and falling through to the generic
+    "session-bound URL" message.
+
+    The real destination is still recoverable without ever navigating
+    the broken chain: AppsFlyer's own redirect carries it as a
+    `deep_link_value` query parameter on an intermediate hop, well
+    before the custom-scheme redirect that breaks Playwright. Checked
+    with a real browser-like GET (not HEAD -- AppsFlyer's redirector
+    doesn't reliably support HEAD) and a desktop user agent (a mobile UA
+    gets bounced to an app-store page instead of the real destination).
+
+    Domain-agnostic on purpose -- this is a widely-used deep-linking
+    convention across many apps, not MMT-specific, so no per-OTA
+    allowlist is needed. Best-effort: any failure (network, no such
+    param, not actually a deep link at all) just returns the URL
+    unchanged, exactly as if this function didn't run -- a normal direct
+    OTA link never even has this parameter, so it always falls through
+    untouched."""
+    try:
+        import requests
+        from urllib.parse import parse_qs, unquote, urlparse
+        r = requests.get(url, allow_redirects=True, timeout=timeout,
+                          headers={"User-Agent": _UA})
+        for resp in list(r.history) + [r]:
+            qs = parse_qs(urlparse(resp.url).query)
+            if "deep_link_value" in qs:
+                real = unquote(qs["deep_link_value"][0])
+                if real.startswith("http"):
+                    return real
+    except Exception:
+        pass
+    return url
+
+
 def render(url: str, *,
            wait: str = "domcontentloaded",
            settle_ms: int = 9000,
@@ -324,6 +366,7 @@ def render(url: str, *,
            on_step: Optional[Callable[[str], None]] = None) -> RenderResult:
     from urllib.parse import urlparse
     sync_playwright = _require_playwright()
+    url = _resolve_deferred_deeplink(url)
     res = RenderResult(url=url)
     keep = xhr_keep or _default_xhr_keep(urlparse(url).netloc.lower())
     step = on_step or (lambda _m: None)

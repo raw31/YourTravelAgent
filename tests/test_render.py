@@ -1,5 +1,47 @@
-"""render.py helpers — _json_digest, llm_context (no browser)."""
-from yta.render import RenderResult, _json_digest
+"""render.py helpers — _json_digest, llm_context, _resolve_deferred_deeplink
+(no browser)."""
+from yta.render import RenderResult, _json_digest, _resolve_deferred_deeplink
+
+
+# -- _resolve_deferred_deeplink -------------------------------------------
+
+class _FakeResp:
+    def __init__(self, url):
+        self.url = url
+
+
+class _FakeFinalResp(_FakeResp):
+    def __init__(self, url, history):
+        super().__init__(url)
+        self.history = history
+
+
+def test_resolve_deferred_deeplink_extracts_the_real_url_from_a_redirect_hop(monkeypatch):
+    # Real live case: an AppsFlyer OneLink share link (app.mmyt.co/...)
+    # redirects through an intermediate hop carrying the actual
+    # destination as `deep_link_value`, before a LATER hop tries to open
+    # a custom app URI that breaks Playwright entirely.
+    real = "https://www.makemytrip.com/hotels/hotel-details?hotelId=123&checkin=09232026"
+    from urllib.parse import quote
+    hop = _FakeResp(f"https://onelink.example/x?deep_link_value={quote(real, safe='')}&other=1")
+    final = _FakeFinalResp("https://apps.apple.com/in/app/makemytrip/id530488359", [hop])
+    monkeypatch.setattr("requests.get", lambda *a, **kw: final)
+    assert _resolve_deferred_deeplink("https://app.mmyt.co/Xm2V/in2ce1bl") == real
+
+
+def test_resolve_deferred_deeplink_returns_unchanged_with_no_such_param(monkeypatch):
+    final = _FakeFinalResp("https://www.booking.com/hotel/in/some-hotel.html", [])
+    monkeypatch.setattr("requests.get", lambda *a, **kw: final)
+    url = "https://www.booking.com/hotel/in/some-hotel.html"
+    assert _resolve_deferred_deeplink(url) == url
+
+
+def test_resolve_deferred_deeplink_returns_unchanged_on_network_failure(monkeypatch):
+    def _boom(*a, **kw):
+        raise ConnectionError("no network")
+    monkeypatch.setattr("requests.get", _boom)
+    url = "https://app.mmyt.co/Xm2V/in2ce1bl"
+    assert _resolve_deferred_deeplink(url) == url
 
 
 # a realistic slice of an OTA itinerary SPA payload: the per-room guest split
