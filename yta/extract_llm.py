@@ -177,7 +177,11 @@ FIELD_QUESTIONS = {
     "stay.check_in": "the check-in date",
     "stay.check_out": "the check-out date",
     "stay.rooms": "the number of rooms",
-    "stay.occupancy": "adults/children (and ages) per room",
+    "stay.occupancy": "adults/children (and ages) PER ROOM -- a bare total "
+                      "headcount with no room breakdown (e.g. just \"4 adults\") "
+                      "is AMBIGUOUS, not 1 room of 4 -- use the clarify field "
+                      "to ask how many rooms and how many in each instead of "
+                      "guessing a room count",
     "requested_offer.room_name": "the room type you booked",
     "ota_benchmark.final_payable": "the total price shown on the page",
 }
@@ -259,9 +263,14 @@ def extract_clarification(missing_paths: list, reply_text: str,
         "gave PARTIAL or ambiguous info for one of these fields that you "
         "could not fully resolve (e.g. they said \"24 Sept to 25 Sept\" "
         "with no year -> ask which year; they said \"me and my wife\" for "
-        "occupancy with an unclear room count -> ask that). Use null for "
-        "\"clarify\" if the reply either fully answered a field or didn't "
-        "address it at all — don't invent a question otherwise."
+        "occupancy with an unclear room count -> ask that; they said "
+        "\"4 adults\" or any other bare total headcount with NO room count "
+        "mentioned -> leave stay.occupancy/stay.rooms null and ask "
+        "specifically how many rooms and how many guests in each — never "
+        "assume everyone is in one room just because only a total was "
+        "given). Use null for \"clarify\" if the reply either fully "
+        "answered a field or didn't address it at all — don't invent a "
+        "question otherwise."
     )
     user = f"Customer's reply so far (may span more than one message): {reply_text!r}"
     if media:

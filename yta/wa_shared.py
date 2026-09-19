@@ -279,8 +279,13 @@ NATURAL_NOUNS = {
     "hotel.name": "the hotel",
     "stay.check_in": "your dates",
     "stay.check_out": "your dates",
-    "stay.rooms": "how many guests",
-    "stay.occupancy": "how many guests",
+    # Deliberately specific about ROOM-level breakdown, not just a
+    # headcount -- a bare "4 adults" reply to a vaguer "how many guests"
+    # ask gets silently read as one room of 4, which can be the wrong
+    # room configuration entirely (2 rooms of 2 is a different, often
+    # differently-priced search). Real live transcript exposed this.
+    "stay.rooms": "how many rooms, and how many in each",
+    "stay.occupancy": "how many rooms, and how many in each",
     "requested_offer.room_name": "the room type",
     "ota_benchmark.final_payable": "the total price",
 }
