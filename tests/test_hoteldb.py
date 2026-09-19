@@ -32,10 +32,10 @@ def con():
         c.execute(
             "INSERT INTO tj_hotels (tj_id,unica_id,hotel_name,hotel_full_name,"
             "name_norm,name_core,rating,lat,lon,region_name,region_norm,"
-            "country_name,country_norm,property_type,description) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "country_name,country_norm,property_type) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tj, u, name, full, norm_name(name), core_name(name), rating, lat, lon,
-             region, norm_region(region), country, norm_name(country), "Hotel", ""))
+             region, norm_region(region), country, norm_name(country), "Hotel"))
     c.execute("INSERT INTO tj_hotels_fts(tj_hotels_fts) VALUES('rebuild')")
     c.commit()
     yield c

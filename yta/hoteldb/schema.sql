@@ -1,8 +1,12 @@
 -- TripJack hotel master (static dump) + matching indexes.
 -- One row per TripJack hotel id.
--- Source columns: id, unica_id, hotel_name, hotel_full_name, rating,
---   location{"lat","lon"}, region_name, country_name, property_type,
---   display_description, tj_country_name
+-- Source columns (2026-09-19 export): id, hotel_name, hotel_full_name,
+--   rating, location{"lat","lon"}, address{city/state/country/postal/...}
+--   (JSON), region_name, tj_country_name, property_type,
+--   contact{"em","ph","wb","fax"} (JSON), chain_name, cover_image, unica_id.
+-- No plain "country_name" or "display_description" field in this export
+-- (the older dump had both; tj_country_name was always preferred over the
+-- messier country_name anyway, and description was never used downstream).
 
 CREATE TABLE IF NOT EXISTS tj_hotels (
     tj_id           INTEGER PRIMARY KEY,   -- TripJack hotel id (also the rowid)
@@ -16,10 +20,13 @@ CREATE TABLE IF NOT EXISTS tj_hotels (
     lon             REAL,
     region_name     TEXT,                  -- city / locality (as given)
     region_norm     TEXT,
-    country_name    TEXT,
+    country_name    TEXT,                  -- from tj_country_name (already the clean/canonical one)
     country_norm    TEXT,
     property_type   TEXT,
-    description     TEXT
+    address         TEXT,                  -- raw JSON: city/state/country/postal/address lines
+    contact         TEXT,                  -- raw JSON: phone/fax/email/website
+    chain_name      TEXT,
+    cover_image     TEXT                   -- photo URL
 );
 
 CREATE INDEX IF NOT EXISTS ix_tj_country ON tj_hotels(country_norm);
