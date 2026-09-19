@@ -42,7 +42,8 @@ class _Packet:
     status = "ok"
     missing_mandatory = []
 
-    def __init__(self, missing=(), hotel_name="Test Hotel", room_name="Deluxe Room"):
+    def __init__(self, missing=(), hotel_name="Test Hotel", room_name="Deluxe Room",
+                description=None):
         self._still_missing = list(missing)
         self.hotel = type("H", (), {"name": hotel_name})()
 
@@ -53,7 +54,8 @@ class _Packet:
         self.stay = _Stay()
 
         self.requested_offer = type("O", (), {
-            "room_name": room_name, "meal_plan": None, "refundable": None})()
+            "room_name": room_name, "description": description,
+            "meal_plan": None, "refundable": None})()
 
         class _Benchmark:
             final_payable = 31683.0
@@ -302,7 +304,9 @@ def test_gives_up_after_max_unproductive_attempts(sent, monkeypatch):
 
     v5.handle_batch("cust", [{"type": "text", "text": "still unrelated"}])
     assert "cust" not in v5._WA_SESSIONS   # attempt 2 -- cap reached, gave up
-    assert any("pick up from there" in m[1] for m in sent if m[0] == "text")
+    assert any("start fresh" in m[1] for m in sent if m[0] == "text")
+    kind, body, _ = sent[-1]   # the LAST message -- attempt 1's ask sent buttons too
+    assert kind == "buttons" and body == v5._ONBOARDING_CHOICE_TEXT
 
 
 def test_progress_resets_the_unproductive_counter(sent, monkeypatch):
@@ -603,6 +607,20 @@ def test_start_over_clears_any_pending_path(sent):
     assert "cust" not in v5._PENDING_PATH
 
 
+@pytest.mark.parametrize("phrase", ["start again", "Start this again", "restart", "RESTART please"])
+def test_natural_restart_phrases_are_recognized_as_cancel(sent, phrase):
+    # Regression, live: a customer typed "Start again" / "Start this
+    # again" mid-conversation expecting a reset -- neither matched the
+    # old cancel regex, so both got silently absorbed as failed answers
+    # to whatever question was open, burning through the unproductive-
+    # attempt cap before the bot gave up on its own.
+    _open_awaiting()
+    v5.handle_batch("cust", [{"type": "text", "text": phrase}])
+    assert "cust" not in v5._WA_SESSIONS
+    kind, body, _ = sent[-1]
+    assert kind == "buttons" and body == v5._ONBOARDING_CHOICE_TEXT
+
+
 def test_missing_field_ask_carries_a_start_new_chat_button(sent, monkeypatch):
     monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://booking.com/x")
     monkeypatch.setattr("yta.pipeline.extract", lambda *a, **kw: _Packet(missing=["ota_benchmark.final_payable"]))
@@ -715,8 +733,10 @@ def test_effective_missing_default_is_unchanged_from_schema():
         == ["ota_benchmark.final_payable"]
 
 
-def test_effective_missing_deal_intent_adds_room_name_back():
-    p = _Packet(room_name=None)
+def test_effective_missing_deal_intent_adds_room_name_back_when_a_hint_exists():
+    # A description exists but didn't resolve to a clean room_name --
+    # worth asking, since there's clearly SOME room in mind.
+    p = _Packet(room_name=None, description="a lovely room with a view")
     assert v5._effective_missing(p, [], "deal") == ["requested_offer.room_name"]
     # already present in the list -- not duplicated
     assert v5._effective_missing(p, ["requested_offer.room_name"], "deal") \
@@ -725,23 +745,57 @@ def test_effective_missing_deal_intent_adds_room_name_back():
     assert v5._effective_missing(_Packet(room_name="Deluxe Room"), [], "deal") == []
 
 
+def test_effective_missing_deal_intent_does_not_force_room_with_no_hint_at_all():
+    # Neither room_name NOR description at all -- the customer plainly
+    # doesn't have a specific room in mind despite tapping "I have a
+    # deal". Falls through instead of stalling on a field they don't
+    # have -- same as bypassing the buttons entirely (intent=None).
+    p = _Packet(room_name=None, description=None)
+    assert v5._effective_missing(p, [], "deal") == []
+
+
 def test_effective_missing_search_intent_drops_price():
     assert v5._effective_missing(_Packet(), ["ota_benchmark.final_payable"], "search") == []
     assert v5._effective_missing(
         _Packet(), ["ota_benchmark.final_payable", "stay.check_in"], "search") == ["stay.check_in"]
 
 
-def test_have_deal_path_still_asks_for_a_room_even_without_it_in_missing(sent, monkeypatch):
+def test_have_deal_path_still_asks_for_a_room_when_a_hint_exists(sent, monkeypatch):
     # schema.py no longer makes room_name mandatory, so a real extraction
     # with no room would normally report missing=[] -- but on the "I have
-    # a deal" path it should still be asked for.
+    # a deal" path, with SOME room detail to go on, it should still be
+    # asked for.
     v5._PENDING_PATH["cust"] = "deal"
-    monkeypatch.setattr("yta.pipeline.extract", lambda *a, **kw: _Packet(missing=[], room_name=None))
+    monkeypatch.setattr("yta.pipeline.extract",
+                         lambda *a, **kw: _Packet(missing=[], room_name=None,
+                                                  description="a lovely room with a view"))
     v5.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x", }])
     body = next(m[1] for m in sent if m[0] == "buttons")
     assert "room" in body.lower()
     assert v5._WA_SESSIONS["cust"]["state"] == "awaiting_field"
     assert v5._WA_SESSIONS["cust"]["missing"] == ["requested_offer.room_name"]
+
+
+def test_have_deal_path_falls_through_to_options_with_no_room_hint_at_all(sent, monkeypatch):
+    # Neither room_name nor description at all, despite tapping "I have a
+    # deal" -- rather than nagging for a room that was never coming, it
+    # proceeds exactly like the search path would.
+    v5._PENDING_PATH["cust"] = "deal"
+    monkeypatch.setattr("yta.pipeline.extract",
+                         lambda *a, **kw: _Packet(missing=[], room_name=None, description=None))
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {"room_options": {"groups": [
+            {"room_type_id": "R1", "room_name": "Deluxe Room", "total_combos": 1, "options": [
+                {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
+                 "refundable": True, "currency": "INR", "total_price": 20000.0},
+            ]},
+        ]}},
+    )
+    v5.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x", }])
+    assert v5._WA_SESSIONS["cust"]["state"] == "choosing_option"
+    assert not any(m[0] == "buttons" and "start_new_chat" in [bid for bid, _ in m[2]]
+                   for m in sent)   # never entered awaiting_field asking for a room
 
 
 def test_search_hotel_path_proceeds_without_a_price(sent, monkeypatch):
@@ -829,7 +883,9 @@ def test_picking_an_invalid_number_reprompts_then_gives_up(sent):
 
     v5.handle_batch("cust", [{"type": "text", "text": "still not a number"}])
     assert "cust" not in v5._WA_SESSIONS   # attempt 2 -- gave up
-    assert any("start again" in m[1].lower() for m in sent if m[0] == "text")
+    assert any("start fresh" in m[1].lower() for m in sent if m[0] == "text")
+    kind, body, _ = next(m for m in sent if m[0] == "buttons")
+    assert body == v5._ONBOARDING_CHOICE_TEXT   # re-offers the choice, not silence
 
 
 def test_confirming_a_picked_option_records_the_lead_normally(sent, monkeypatch):

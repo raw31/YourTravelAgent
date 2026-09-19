@@ -20,9 +20,12 @@ What v5 adds on top:
      the next real submission consumes it.
   10. The two paths ask different things of `check_mandatory()`'s output
      (_effective_missing): "I have a deal" adds `requested_offer.room_name`
-     BACK into what's asked for even though yta/schema.py no longer makes
-     it globally mandatory -- someone who says they have a specific room
-     picked out should still be asked for it. "Search a hotel" REMOVES
+     BACK into what's asked for -- but only when there's SOME room detail
+     to go on (a description) that just didn't resolve to a clean name;
+     when there's neither a room_name NOR a description at all, forcing
+     the question would stall on a field the customer plainly doesn't
+     have, so it falls through to the room-options list instead, same as
+     bypassing the buttons entirely would. "Search a hotel" REMOVES
      `ota_benchmark.final_payable` from what's asked for -- there's no OTA
      price to compare against when the whole point is finding one, so
      requiring it would stall the conversation on a field that doesn't
@@ -209,7 +212,8 @@ _SESSION_MAX_AGE_SEC = 24 * 60 * 60
 _MAX_UNPRODUCTIVE_ATTEMPTS = 2   # "after two fallback attempts, suggest human assistance"
 
 _CANCEL_RE = re.compile(
-    r"\b(cancel|start over|start new|new chat|wrong hotel|different hotel|new hotel|never ?mind)\b",
+    r"\b(cancel|start over|start again|start this again|restart|start new|new chat|"
+    r"wrong hotel|different hotel|new hotel|never ?mind)\b",
     re.IGNORECASE,
 )
 _CONFIRM_RE = re.compile(r"\b(yes|confirm|book it|go ahead|book this)\b", re.IGNORECASE)
@@ -294,11 +298,24 @@ def _effective_missing(packet, missing: list, intent: str | None) -> list:
     no-room submission on its own (the default, `intent=None`, when a
     customer bypasses the buttons entirely). An explicit intent layers the
     ONE additional expectation that path implies, without changing what
-    schema.py itself considers mandatory for every other flow."""
+    schema.py itself considers mandatory for every other flow.
+
+    On "deal", room_name is only forced back in when there's SOME room
+    detail to go on (a description) but it didn't resolve to a clean
+    name -- worth one clarifying question. When there's NEITHER a
+    room_name NOR a description at all, the customer plainly doesn't have
+    a specific room in mind (they may have tapped "I have a deal" without
+    registering the distinction, or their screenshot just didn't include a
+    room selection) -- forcing the question every time just stalls the
+    conversation on a field they don't have. Falling through here (same
+    as intent=None) lets it proceed straight to the room-options list
+    instead of nagging for a room that was never coming."""
     if intent == "search":
         return [m for m in missing if m != "ota_benchmark.final_payable"]
     if intent == "deal":
-        if not packet.requested_offer.room_name and "requested_offer.room_name" not in missing:
+        has_room_hint = packet.requested_offer.room_name or packet.requested_offer.description
+        if not packet.requested_offer.room_name and has_room_hint \
+                and "requested_offer.room_name" not in missing:
             return missing + ["requested_offer.room_name"]
         return missing
     return missing
@@ -551,8 +568,9 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
             with _WA_SESSIONS_LOCK:
                 _WA_SESSIONS.pop(frm, None)
             wa_send(frm, "I wasn't able to pull together everything I need for this one "
-                         "just yet — whenever it's convenient, send a fresh link or photo "
-                         "and we'll pick up from there.")
+                         "just yet — no worries, let's start fresh.")
+            _PENDING_PATH.pop(frm, None)
+            _send_onboarding_choice(frm)
             return
         question = _closing_question(session["missing"])
         with _WA_SESSIONS_LOCK:
@@ -600,8 +618,9 @@ def _handle_choosing_option(frm: str, session: dict, items: list) -> None:
             print(f"[wa v5] {frm} gave up picking an option after {attempts} tries", flush=True)
             with _WA_SESSIONS_LOCK:
                 _WA_SESSIONS.pop(frm, None)
-            wa_send(frm, "No worries — whenever you're ready, send a fresh hotel link or "
-                         "the details and we'll start again.")
+            wa_send(frm, "No worries — let's start fresh.")
+            _PENDING_PATH.pop(frm, None)
+            _send_onboarding_choice(frm)
             return
         with _WA_SESSIONS_LOCK:
             session["last_activity"] = time.time()
