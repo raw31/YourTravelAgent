@@ -146,6 +146,36 @@ def test_map_rooms_not_ambiguous_when_one_room_clearly_wins():
     assert r.matched and not r.ambiguous
 
 
+def test_map_rooms_flags_ambiguous_on_a_view_stripping_artifact():
+    # Real bug found live, and NOT caught by the score-tie check above:
+    # "Luxury room" scored a literal 1.0 against "LUXURY, COURTYARD VIEW"
+    # (the comma splits "COURTYARD VIEW" off as a view, leaving bare
+    # "LUXURY" to compare against) while the actual cheapest room,
+    # "Luxury Room Facade View" (no comma -- its full name stays in the
+    # comparison), scored only 0.64. Not a close tie at all -- the tell
+    # is the query gave no view/bed detail AND the winner's own name had
+    # a chunk excluded from scoring while a sibling room shares its
+    # category ("luxury").
+    opts = OPTIONS + [
+        _opt("R7", "Luxury Room Facade View", "Room Only", False, 30000, "o12"),
+        _opt("R8", "LUXURY, COURTYARD VIEW", "Room Only", False, 32000, "o13"),
+    ]
+    off = Offer(room_name="Luxury room")
+    r = map_rooms(opts, off, use_llm=False)
+    assert r.matched and r.score == 1.0            # the suspicious perfect score
+    assert r.ambiguous
+
+
+def test_map_rooms_view_suffix_alone_is_not_ambiguous_with_no_sibling():
+    # Same view-stripping shape (a comma splits off a view), but nothing
+    # ELSE at the hotel shares the "ocean" category -- a single genuinely
+    # unique room should not be flagged just for using a comma in its name.
+    opts = [_opt("R9", "Suite, Ocean View", "Room Only", False, 50000, "o14")]
+    off = Offer(room_name="Suite")
+    r = map_rooms(opts, off, use_llm=False)
+    assert r.matched and not r.ambiguous
+
+
 def test_map_rooms_no_ratekey_match_still_lists_all_options():
     off = Offer(room_name="Executive Villa", meal_plan="All Inclusive", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)

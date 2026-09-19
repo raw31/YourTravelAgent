@@ -289,6 +289,7 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
     # 3. gate + LLM
     llm_used = False
     ambiguous = False
+    close: list = []   # only ever populated on the eligible/tie-check path below
     eligible = [b for b in scored if b.score >= cfg.MIN_BASE_SCORE]
     chosen: RoomBucket | None = None
     if eligible:
@@ -336,6 +337,31 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
 
     _log(f"matched room_type_id {chosen.room_type_id} — {chosen.canonical!r} "
          f"(score {chosen.score:.3f}, {band})")
+
+    # 3b. a second, different kind of ambiguity: a generic query "winning"
+    # by artifact of the WINNING room's own name happening to use a comma/
+    # dash (so split_name_and_view() strips its view off before scoring,
+    # comparing the query against a bare category word like "LUXURY"
+    # alone) while an equally-generic sibling room's name has no such
+    # separator (so its full, longer name stays in the comparison and
+    # scores far lower for no real reason) -- found live: "Luxury room"
+    # scored a literal 1.0 against "LUXURY, COURTYARD VIEW" (view
+    # stripped) while "Luxury Room Facade View" (no comma, view NOT
+    # stripped, and actually the cheaper room) scored only 0.64. Not a
+    # close-score tie (the len(close) check above never catches it) --
+    # the tell is that the query gave no view/bed detail of its own AND
+    # the winner's OWN name had a chunk excluded from the comparison at
+    # all, while at least one other real room shares the query's anchor
+    # word (its category, e.g. "luxury").
+    if not ambiguous and chosen.view and not q_view and not bed_kw:
+        anchor = q_base.split()[0].lower() if q_base else ""
+        if anchor and any(b.room_type_id != chosen.room_type_id
+                          and anchor in b.canonical.lower() for b in scored):
+            ambiguous = True
+            notes.append(f"{chosen.canonical!r} matched by comparing only its bare "
+                         f"category (its own {chosen.view!r} was excluded from the "
+                         f"comparison since the query gave no view) while another "
+                         f"room shares the {anchor!r} category — treating as ambiguous")
 
     # 4. view check — flag & ignore
     view_flag = None
@@ -420,7 +446,7 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
                     + ")" if req_meal or req_ref is not None else ""))
     _log(f"  {len(sel)} option(s) for the matched room; {len(ratekey_ids)} match the rate plan")
 
-    if ambiguous:
+    if len(close) > 1:
         notes.append(f"{len(close)} rooms scored within {cfg.LLM_TIEBREAK_DELTA} of each "
                      f"other — treating this match as ambiguous")
 
