@@ -852,22 +852,43 @@ def _resolve(packet) -> dict:
                                 det.options, packet.requested_offer,
                                 benchmark_price=packet.ota_benchmark.final_payable,
                                 policy=packet.matching_policy, log=packet.log)
-                            rmd = rm.to_dict()
-                            b = packet.ota_benchmark
-                            rmd["our_price"] = {
-                                "final_payable": b.final_payable, "subtotal": b.subtotal,
-                                "taxes": b.taxes, "fees": b.fees, "discount": b.discount,
-                                "currency": b.currency,
-                                "room_name": packet.requested_offer.room_name,
-                                "meal_plan": packet.requested_offer.meal_plan,
-                                "cancellation": packet.requested_offer.cancellation,
-                            }
-                            d["room_map"] = rmd
-                            packet.log(
-                                f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
-                                f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"
-                                + ("; LLM used" if rm.llm_used else "")
-                                + " — pick an option in the panel to prebook (Review)")
+                            if rm.matched and rm.ambiguous:
+                                # The OTA room name scored close against
+                                # SEVERAL real, differently-priced rooms at
+                                # this hotel (e.g. "Luxury room" matching one
+                                # of 9 "Luxury..." room types) -- picking just
+                                # one and quoting/rejecting based on it alone
+                                # risks comparing against the wrong (and not
+                                # necessarily cheapest) room entirely. Falls
+                                # back to the same manual-pick list the
+                                # no-room-name path already uses, same as a
+                                # genuinely un-named room, rather than
+                                # trusting a single low-confidence guess.
+                                from yta.roommap import list_cheapest_rooms
+                                rgr = list_cheapest_rooms(det.options)
+                                d["room_options"] = rgr.to_dict()
+                                packet.log(
+                                    f"room name {packet.requested_offer.room_name!r} matched "
+                                    f"{rm.room_type_id} but ambiguously (score {rm.score:.2f}, "
+                                    f"multiple close rooms) — listing {len(rgr.groups)} room(s) "
+                                    f"for the customer to pick instead of guessing")
+                            else:
+                                rmd = rm.to_dict()
+                                b = packet.ota_benchmark
+                                rmd["our_price"] = {
+                                    "final_payable": b.final_payable, "subtotal": b.subtotal,
+                                    "taxes": b.taxes, "fees": b.fees, "discount": b.discount,
+                                    "currency": b.currency,
+                                    "room_name": packet.requested_offer.room_name,
+                                    "meal_plan": packet.requested_offer.meal_plan,
+                                    "cancellation": packet.requested_offer.cancellation,
+                                }
+                                d["room_map"] = rmd
+                                packet.log(
+                                    f"room map → {'matched ' + str(rm.room_type_id) if rm.matched else 'no match'}"
+                                    f" [{rm.band}]; {len(rm.rate_options)} rate option(s)"
+                                    + ("; LLM used" if rm.llm_used else "")
+                                    + " — pick an option in the panel to prebook (Review)")
                         else:
                             # -- new path: no requested room -- the 5 cheapest
                             #    DISTINCT rooms, up to 2 meal x refundability

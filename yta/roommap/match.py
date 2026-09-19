@@ -101,6 +101,14 @@ class RoomMapResult:
     llm_used: bool
     notes: list = field(default_factory=list)
     ratekey_option_ids: list = field(default_factory=list)  # options that match the rate plan
+    # True when the OTA room name matched several real, differently-priced
+    # rooms at this hotel too closely to call confidently -- e.g. "Luxury
+    # room" at a hotel with 9 room types carrying "Luxury" in the name.
+    # `chosen`/`rate_options` still reflect the single best-scored (or
+    # LLM-tie-broken) bucket -- callers that need to fall back to letting
+    # the customer pick instead of trusting that one guess check this flag
+    # (see yta/web.py::_resolve()).
+    ambiguous: bool = False
 
     def to_dict(self):
         d = asdict(self)
@@ -280,11 +288,17 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
 
     # 3. gate + LLM
     llm_used = False
+    ambiguous = False
     eligible = [b for b in scored if b.score >= cfg.MIN_BASE_SCORE]
     chosen: RoomBucket | None = None
     if eligible:
         top = eligible[0]
         close = [b for b in eligible if top.score - b.score <= cfg.LLM_TIEBREAK_DELTA]
+        # Ambiguity is about how many REAL rooms scored close together, not
+        # about whether an LLM happened to be available to pick between
+        # them -- computed regardless of `use_llm` so a caller can still
+        # see it even when LLM tie-breaking itself is disabled.
+        ambiguous = len(close) > 1
         if len(close) > 1 and use_llm:
             _log(f"  {len(close)} buckets within {cfg.LLM_TIEBREAK_DELTA} — LLM tie-break")
             pick = _llm_tiebreak(offer, close)
@@ -406,11 +420,16 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
                     + ")" if req_meal or req_ref is not None else ""))
     _log(f"  {len(sel)} option(s) for the matched room; {len(ratekey_ids)} match the rate plan")
 
+    if ambiguous:
+        notes.append(f"{len(close)} rooms scored within {cfg.LLM_TIEBREAK_DELTA} of each "
+                     f"other — treating this match as ambiguous")
+
     return RoomMapResult(
         matched=True, room_type_id=chosen.room_type_id, band=band,
         score=chosen.score, rate_options=rate_options, ranked_buckets=scored,
         meal_filter=req_meal, refundable_filter=req_ref, view_flag=view_flag,
-        llm_used=llm_used, notes=notes, ratekey_option_ids=ratekey_ids)
+        llm_used=llm_used, notes=notes, ratekey_option_ids=ratekey_ids,
+        ambiguous=ambiguous)
 
 
 # -- no-requested-room path: cheapest rooms x their meal/refund variants -

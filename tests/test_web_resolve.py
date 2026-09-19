@@ -139,6 +139,27 @@ def test_no_options_at_all_sets_neither_key(monkeypatch):
     assert "room_options" not in d2
 
 
+_AMBIGUOUS_ROOM_OPTIONS = [
+    _opt("R5", "Grand Suite", "Breakfast", True, 60000, "o10"),
+    _opt("R6", "Grand Suite", "Room Only", False, 55000, "o11"),
+]
+
+
+def test_ambiguous_room_match_falls_back_to_room_options(monkeypatch):
+    # Real bug found live: "Luxury room" matched ONE of 9 differently-
+    # priced "Luxury..." rooms at a hotel confidently, so the customer
+    # got compared against (and told "nothing better than") a single
+    # possibly-wrong, possibly-pricier room. Two identically-named
+    # buckets is the deterministic way to force map_rooms()'s own
+    # `ambiguous` flag (see tests/test_roommap.py for that unit test).
+    _wire_common_mocks(monkeypatch, _AMBIGUOUS_ROOM_OPTIONS)
+    d = _resolve(_packet(room_name="Grand Suite"))
+    assert "room_map" not in d
+    assert "room_options" in d
+    groups = d["room_options"]["groups"]
+    assert {g["room_type_id"] for g in groups} == {"R5", "R6"}
+
+
 def test_no_room_name_path_logs_a_summary_line(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     pkt = _packet(room_name=None)

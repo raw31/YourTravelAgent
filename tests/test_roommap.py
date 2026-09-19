@@ -123,6 +123,29 @@ def test_map_rooms_no_match_returns_ranked_buckets():
     assert r.ranked_buckets and r.ranked_buckets[0].score < 0.85
 
 
+def test_map_rooms_flags_ambiguous_when_multiple_rooms_score_identically():
+    # Real bug found live: a customer typed "Luxury room" at a hotel with
+    # 9 differently-priced "Luxury..." room types -- the matcher picked
+    # ONE confidently ("strong" band) and compared only against it, while
+    # a cheaper "Luxury" room sat unchecked. Two buckets with the exact
+    # same name (score tied at the top) is the simplest deterministic way
+    # to reproduce "several real rooms scored too close to trust one pick."
+    opts = OPTIONS + [
+        _opt("R5", "Grand Suite", "Breakfast", True, 60000, "o10"),
+        _opt("R6", "Grand Suite", "Room Only", False, 55000, "o11"),
+    ]
+    off = Offer(room_name="Grand Suite")
+    r = map_rooms(opts, off, use_llm=False)
+    assert r.matched and r.ambiguous
+    assert r.room_type_id in ("R5", "R6")   # still picks ONE (for direct callers), but flags it
+
+
+def test_map_rooms_not_ambiguous_when_one_room_clearly_wins():
+    off = Offer(room_name="Deluxe Villa", meal_plan="Half Board", refundable=True)
+    r = map_rooms(OPTIONS, off, use_llm=False)
+    assert r.matched and not r.ambiguous
+
+
 def test_map_rooms_no_ratekey_match_still_lists_all_options():
     off = Offer(room_name="Executive Villa", meal_plan="All Inclusive", refundable=True)
     r = map_rooms(OPTIONS, off, use_llm=False)
