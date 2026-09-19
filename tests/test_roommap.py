@@ -249,6 +249,29 @@ def test_list_cheapest_rooms_accepts_supplier_options_too():
     assert flat_raw == flat_sup
 
 
+def test_list_cheapest_rooms_accepts_supplier_option_to_dict_shape_too():
+    # Real bug found building v6's "not_cheaper" state: resolution
+    # objects only ever hold detail.to_dict()'s output
+    # (resolution["detail"]["options"]) -- a list of plain dicts with
+    # SupplierOption's own snake_case field names (option_id, rooms,
+    # meal_basis, ...), not the raw camelCase TripJack API shape
+    # (optionId, roomInfo, ...) and not live SupplierOption objects
+    # either. _rows() silently mis-parsed this third shape into
+    # "(unnamed)" rooms at price 0.00 instead of raising -- caught only
+    # because a real test threaded actual data all the way through.
+    from yta.tripjack.hotel import _norm_option
+    sopts = [_norm_option(o) for o in _MULTI_ROOM_OPTIONS]
+    dict_opts = [o.to_dict() for o in sopts]
+    r_raw = list_cheapest_rooms(_MULTI_ROOM_OPTIONS)
+    r_dict = list_cheapest_rooms(dict_opts)
+    assert [g.room_type_id for g in r_dict.groups] == [g.room_type_id for g in r_raw.groups]
+    assert [g.room_name for g in r_dict.groups] == [g.room_name for g in r_raw.groups]
+    flat_raw = [(o.option_id, o.total_price) for g in r_raw.groups for o in g.options]
+    flat_dict = [(o.option_id, o.total_price) for g in r_dict.groups for o in g.options]
+    assert flat_dict == flat_raw
+    assert not any(g.room_name == "(unnamed)" for g in r_dict.groups)
+
+
 def test_list_cheapest_rooms_tags_every_option():
     r = list_cheapest_rooms(_MULTI_ROOM_OPTIONS)
     assert all(o.tags == ["cheapest-in-room"] for g in r.groups for o in g.options)

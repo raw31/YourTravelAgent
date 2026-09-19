@@ -125,7 +125,7 @@ class RoomMapResult:
 def _rows(options) -> list[dict]:
     out = []
     for o in options or []:
-        if hasattr(o, "option_id"):                       # SupplierOption
+        if hasattr(o, "option_id"):                       # SupplierOption object
             rooms = o.rooms or []
             row = {
                 "option_id": o.option_id, "meal_basis": o.meal_basis or "",
@@ -133,6 +133,19 @@ def _rows(options) -> list[dict]:
                 "total_price": float(o.total_price or 0),
                 "currency": o.currency or "",
                 "option_type": o.option_type or "",
+            }
+        elif isinstance(o, dict) and "option_id" in o:    # SupplierOption.to_dict() --
+            # same fields as above, snake_case, but already a plain dict
+            # (e.g. resolution["detail"]["options"] after _resolve() has
+            # serialized it) -- distinguished from the raw-API dict below
+            # by "option_id" (snake_case) vs. that shape's "optionId".
+            rooms = o.get("rooms") or []
+            row = {
+                "option_id": o.get("option_id", ""), "meal_basis": o.get("meal_basis") or "",
+                "refundable": bool(o.get("refundable")),
+                "total_price": float(o.get("total_price") or 0),
+                "currency": o.get("currency", "") or "",
+                "option_type": o.get("option_type", "") or "",
             }
         else:                                            # raw pricing dict
             rooms = o.get("roomInfo") or []

@@ -7,7 +7,8 @@
 CREATE TABLE IF NOT EXISTS leads (
     booking_ref       TEXT PRIMARY KEY,   -- "BMS-XXXXXXXX", shown to the customer
     phone             TEXT NOT NULL,
-    status            TEXT NOT NULL,      -- 'confirmed' | 'declined'
+    status            TEXT NOT NULL,      -- 'confirmed' | 'declined' | 'no_deal' (matched but
+                                           -- not cheaper -- internal analytics only, v6+)
     created_at        TEXT NOT NULL,      -- ISO timestamp, UTC
 
     hotel_name        TEXT,

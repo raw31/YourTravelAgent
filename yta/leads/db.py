@@ -66,7 +66,11 @@ def record_lead(phone: str, status: str, packet, resolution: dict | None,
     Returns the generated booking reference ("BMS-XXXXXXXX"). `referred_by`
     is a prior booking_ref, when this lead came in through another
     customer's referral share."""
-    assert status in ("confirmed", "declined"), status
+    # "no_deal" (v6+): a matched rate that wasn't actually cheaper --
+    # logged purely for internal analysis (ota_price/price columns
+    # already capture everything needed for the gap), never shown to
+    # the customer.
+    assert status in ("confirmed", "declined", "no_deal"), status
     best = _best_option(resolution)
     ref = "BMS-" + uuid.uuid4().hex[:8].upper()
     occ = packet.stay.occupancy or []
