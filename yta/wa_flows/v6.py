@@ -357,15 +357,28 @@ def _effective_missing(packet, missing: list, intent: str | None) -> list:
     room selection) -- forcing the question every time just stalls the
     conversation on a field they don't have. Falling through here (same
     as intent=None) lets it proceed straight to the room-options list
-    instead of nagging for a room that was never coming."""
+    instead of nagging for a room that was never coming.
+
+    No room name at all, REGARDLESS of intent, also always drops the
+    price requirement -- _resolve() already forks into a hotel-based
+    search whenever room_name is empty (see yta/web.py), and there's
+    nothing to compare a price against on that path. Real transcript that
+    exposed the gap: a customer typed "Hey" (no button tapped, intent
+    stays None), then hotel+dates with no room -- asked for a price;
+    replied "Do hotel search only" (a plain-text intent change this
+    codebase doesn't parse) -- STILL asked for a price, with nothing to
+    give, and gave up. This is a blanket fallback under whatever the
+    intent-specific branches above already decided, not a replacement for
+    them -- it only ever REMOVES the price requirement, never adds one."""
     if intent == "search":
-        return [m for m in missing if m != "ota_benchmark.final_payable"]
-    if intent == "deal":
+        missing = [m for m in missing if m != "ota_benchmark.final_payable"]
+    elif intent == "deal":
         has_room_hint = packet.requested_offer.room_name or packet.requested_offer.description
         if not packet.requested_offer.room_name and has_room_hint \
                 and "requested_offer.room_name" not in missing:
-            return missing + ["requested_offer.room_name"]
-        return missing
+            missing = missing + ["requested_offer.room_name"]
+    if not packet.requested_offer.room_name:
+        missing = [m for m in missing if m != "ota_benchmark.final_payable"]
     return missing
 
 

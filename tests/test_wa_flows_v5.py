@@ -788,6 +788,27 @@ def test_effective_missing_search_intent_drops_price():
         _Packet(), ["ota_benchmark.final_payable", "stay.check_in"], "search") == ["stay.check_in"]
 
 
+def test_effective_missing_drops_price_whenever_room_name_is_absent_regardless_of_intent():
+    # Real bug, live transcript: a customer typed "Hey" (no button
+    # tapped, intent stays None) then hotel+dates with no room -- asked
+    # for a price; replied "Do hotel search only" (plain text, not a
+    # recognized intent change) -- STILL asked for a price they didn't
+    # have, and gave up. No room name at all means _resolve() is going
+    # to do a hotel-based search regardless (see yta/web.py) -- price
+    # should never be required to get there, no matter what intent is.
+    p = _Packet(room_name=None, description=None)
+    assert v5._effective_missing(p, ["ota_benchmark.final_payable"], None) == []
+    assert v5._effective_missing(p, ["ota_benchmark.final_payable"], "deal") == []
+    assert v5._effective_missing(
+        p, ["ota_benchmark.final_payable", "stay.rooms"], None) == ["stay.rooms"]
+
+
+def test_effective_missing_still_requires_price_once_a_room_is_named():
+    p = _Packet(room_name="Deluxe Room")
+    assert v5._effective_missing(p, ["ota_benchmark.final_payable"], None) \
+        == ["ota_benchmark.final_payable"]
+
+
 def test_have_deal_path_still_asks_for_a_room_when_a_hint_exists(sent, monkeypatch):
     # schema.py no longer makes room_name mandatory, so a real extraction
     # with no room would normally report missing=[] -- but on the "I have

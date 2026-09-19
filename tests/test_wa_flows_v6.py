@@ -979,6 +979,20 @@ def test_effective_missing_search_intent_drops_price():
         _Packet(), ["ota_benchmark.final_payable", "stay.check_in"], "search") == ["stay.check_in"]
 
 
+def test_effective_missing_drops_price_whenever_room_name_is_absent_regardless_of_intent():
+    p = _Packet(room_name=None, description=None)
+    assert v6._effective_missing(p, ["ota_benchmark.final_payable"], None) == []
+    assert v6._effective_missing(p, ["ota_benchmark.final_payable"], "deal") == []
+    assert v6._effective_missing(
+        p, ["ota_benchmark.final_payable", "stay.rooms"], None) == ["stay.rooms"]
+
+
+def test_effective_missing_still_requires_price_once_a_room_is_named():
+    p = _Packet(room_name="Deluxe Room")
+    assert v6._effective_missing(p, ["ota_benchmark.final_payable"], None) \
+        == ["ota_benchmark.final_payable"]
+
+
 def test_have_deal_path_still_asks_for_a_room_when_a_hint_exists(sent, monkeypatch):
     v6._PENDING_PATH["cust"] = "deal"
     monkeypatch.setattr("yta.pipeline.extract",
