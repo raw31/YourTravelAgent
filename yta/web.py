@@ -864,14 +864,34 @@ def _resolve(packet) -> dict:
                                 # no-room-name path already uses, same as a
                                 # genuinely un-named room, rather than
                                 # trusting a single low-confidence guess.
-                                from yta.roommap import list_cheapest_rooms
+                                from yta.roommap import RoomGroup, list_cheapest_rooms
                                 rgr = list_cheapest_rooms(det.options)
+                                # The algorithm's own best guess leads the
+                                # list, THEN the rest in the usual cheapest-
+                                # first order -- the customer's typed room
+                                # name is still the single most relevant
+                                # signal we have, even when it wasn't
+                                # confident enough to quote outright.
+                                if any(g.room_type_id == rm.room_type_id for g in rgr.groups):
+                                    rgr.groups.sort(key=lambda g: g.room_type_id != rm.room_type_id)
+                                elif rm.rate_options:
+                                    # The matched room didn't make the
+                                    # cheapest-5 cut on price alone --
+                                    # prepend it anyway using the options
+                                    # map_rooms() already found for it, so
+                                    # the "nearest match" is never silently
+                                    # dropped just for not being cheap.
+                                    rgr.groups.insert(0, RoomGroup(
+                                        room_type_id=rm.room_type_id,
+                                        room_name=rm.rate_options[0].room_name,
+                                        options=rm.rate_options[:2],
+                                        total_combos=len(rm.rate_options)))
                                 d["room_options"] = rgr.to_dict()
                                 packet.log(
                                     f"room name {packet.requested_offer.room_name!r} matched "
                                     f"{rm.room_type_id} but ambiguously (score {rm.score:.2f}, "
-                                    f"multiple close rooms) — listing {len(rgr.groups)} room(s) "
-                                    f"for the customer to pick instead of guessing")
+                                    f"multiple close rooms) — listing {len(rgr.groups)} room(s), "
+                                    f"nearest match first, for the customer to pick instead of guessing")
                             else:
                                 rmd = rm.to_dict()
                                 b = packet.ota_benchmark

@@ -160,6 +160,46 @@ def test_ambiguous_room_match_falls_back_to_room_options(monkeypatch):
     assert {g["room_type_id"] for g in groups} == {"R5", "R6"}
 
 
+def test_ambiguous_match_reorders_nearest_match_first(monkeypatch):
+    # The algorithm's own best guess should lead the list, then the rest
+    # in the usual cheapest-first order -- not just whatever order
+    # list_cheapest_rooms() would have picked on price alone. Uses the
+    # view-stripping ambiguity path (deterministic, no LLM tie-break)
+    # with the matched room priced in the MIDDLE, not first or last, to
+    # prove this is a real reorder and not a coincidence of price order.
+    opts = [
+        _opt("R1", "Budget Room", "Room Only", False, 10000, "b1"),
+        _opt("R2", "Luxury Room Facade View", "Room Only", False, 15000, "o1"),
+        _opt("R3", "LUXURY, COURTYARD VIEW", "Room Only", False, 20000, "o2"),
+    ]
+    _wire_common_mocks(monkeypatch, opts)
+    d = _resolve(_packet(room_name="Luxury room"))
+    assert "room_map" not in d
+    groups = d["room_options"]["groups"]
+    # Price order alone would be Budget(10k), Facade View(15k), Courtyard(20k)
+    # -- the matched room (Courtyard, the ambiguous pick) must lead anyway.
+    assert groups[0]["room_type_id"] == "R3"
+    assert [g["room_type_id"] for g in groups[1:]] == ["R1", "R2"]   # rest stay price-ordered
+
+
+def test_ambiguous_match_not_in_cheapest_five_is_prepended_anyway(monkeypatch):
+    # If the matched room didn't make the cheapest-5 cut on price alone,
+    # it must still appear -- never silently dropped just for being
+    # expensive.
+    opts = [_opt(f"B{i}", f"Budget Room {i}", "Room Only", False, 5000 + i * 100, f"b{i}")
+            for i in range(1, 6)]   # 5 cheap rooms, filling the cap
+    opts += [
+        _opt("R2", "Luxury Room Facade View", "Room Only", False, 30000, "o1"),
+        _opt("R3", "LUXURY, COURTYARD VIEW", "Room Only", False, 40000, "o2"),
+    ]
+    _wire_common_mocks(monkeypatch, opts)
+    d = _resolve(_packet(room_name="Luxury room"))
+    groups = d["room_options"]["groups"]
+    assert len(groups) == 6                      # the usual 5 + the prepended match
+    assert groups[0]["room_type_id"] == "R3"      # the ambiguous match, prepended first
+    assert [g["room_type_id"] for g in groups[1:]] == ["B1", "B2", "B3", "B4", "B5"]
+
+
 def test_no_room_name_path_logs_a_summary_line(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     pkt = _packet(room_name=None)
