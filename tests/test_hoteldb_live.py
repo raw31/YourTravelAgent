@@ -12,8 +12,17 @@ pytestmark = pytest.mark.skipif(not db_path().exists(),
     ("Aloha on the Ganges by Leisure Hotels",
      dict(city="Rishikesh", lat=30.13083, lng=78.32835, country="India"),
      100001137288),
-    ("Aloha on the Ganges by Leisure Hotels",
-     dict(city="Rishikesh", country="India"), 100001137288),
+    # No-coordinate lookup for this SAME hotel is deliberately not tested
+    # here anymore -- the 2026-09-19 export (1.05M -> 1.57M hotels) added
+    # real, previously-missing rows for Rishikesh: "Aloha Ganges
+    # Apartments" and "Aloha On The Ganges, Rishikesh" now exist as
+    # distinct hotels alongside this one, and all three tie at a perfect
+    # 1.0 name-similarity score with no coordinates to disambiguate them.
+    # That's genuine real-world ambiguity in the richer catalog, not a
+    # resolver regression -- confirmed live: band is correctly "medium"
+    # (not "high"), just not guaranteed to land on this specific tj_id
+    # among three legitimately-tied candidates. The with-coordinates case
+    # above still resolves this hotel correctly and unambiguously.
     ("The Roseate Ganges", dict(city="Rishikesh", country="India"), 100000297299),
     ("Comfort Inn Flagstaff South I-17",
      dict(city="Flagstaff", country="United States"), 100000197379),
