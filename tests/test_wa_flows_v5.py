@@ -847,6 +847,60 @@ def test_present_option_choices_shows_each_room_name_once_with_its_own_variants(
     assert [o["option_id"] for o in v5._WA_SESSIONS["cust"]["options"]] == ["r1", "r2", "p1"]
 
 
+def test_present_option_choices_shows_nearest_match_and_cheapest_callouts_when_ambiguous(sent):
+    # Per explicit instruction: when the room match wasn't confident
+    # enough to quote outright, name the nearest match AND the cheapest
+    # option up front, before the full list -- not just drop the
+    # customer into a bare numbered list with no explanation.
+    groups = [
+        {"room_type_id": "R2", "room_name": "LUXURY, COURTYARD VIEW", "total_combos": 1, "options": [
+            _rate("o2", "LUXURY, COURTYARD VIEW", "Room Only", False, 38450.13),
+        ]},   # nearest match, listed first, but NOT the cheapest
+        {"room_type_id": "R1", "room_name": "Luxury Room Facade View", "total_combos": 1, "options": [
+            _rate("o1", "Luxury Room Facade View", "Room Only", False, 37718.04),
+        ]},   # actually cheaper
+    ]
+    resolution = {"detail": {"hotel_name": "Taj Santacruz"},
+                  "room_options": {"groups": groups, "ambiguous_match": True,
+                                   "nearest_match_room_type_id": "R2"}}
+    v5._present_option_choices("cust", _Packet(), resolution)
+    text = next(m[1] for m in sent if m[0] == "text")
+    assert "🎯 Nearest match: Luxury, Courtyard View" in text and "38,450.13" in text
+    assert "💰 Cheapest available: Luxury Room Facade View" in text and "37,718.04" in text
+    assert "Full list:" in text
+    assert "Here's what's available:" not in text
+
+
+def test_present_option_choices_no_duplicate_callout_when_nearest_is_cheapest(sent):
+    groups = [
+        {"room_type_id": "R1", "room_name": "Deluxe Room", "total_combos": 1, "options": [
+            _rate("o1", "Deluxe Room", "Room Only", False, 20000.0),
+        ]},
+        {"room_type_id": "R2", "room_name": "Premier Room", "total_combos": 1, "options": [
+            _rate("o2", "Premier Room", "Room Only", False, 25000.0),
+        ]},
+    ]
+    resolution = {"detail": {"hotel_name": "Taj Santacruz"},
+                  "room_options": {"groups": groups, "ambiguous_match": True,
+                                   "nearest_match_room_type_id": "R1"}}
+    v5._present_option_choices("cust", _Packet(), resolution)
+    text = next(m[1] for m in sent if m[0] == "text")
+    assert text.count("Nearest match") == 1
+    assert "Cheapest available" not in text   # same room -- no redundant second line
+
+
+def test_present_option_choices_no_callouts_when_not_ambiguous(sent):
+    # The plain no-room-name search path must be completely unaffected --
+    # no "ambiguous_match" flag, no callout lines, same message as always.
+    groups = [{"room_type_id": "R1", "room_name": "Deluxe Room", "total_combos": 1,
+               "options": [_rate("o1", "Deluxe Room", "Room Only", False, 20000.0)]}]
+    resolution = {"detail": {"hotel_name": "Taj Santacruz"}, "room_options": {"groups": groups}}
+    v5._present_option_choices("cust", _Packet(), resolution)
+    text = next(m[1] for m in sent if m[0] == "text")
+    assert "Here's what's available:" in text
+    assert "Nearest match" not in text and "Cheapest available" not in text
+
+
 def test_present_option_choices_with_no_options_offers_try_another(sent):
     resolution = {"detail": {"hotel_name": "Taj Santacruz"}, "room_options": {"groups": []}}
     v5._present_option_choices("cust", _Packet(), resolution)

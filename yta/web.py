@@ -887,6 +887,8 @@ def _resolve(packet) -> dict:
                                         options=rm.rate_options[:2],
                                         total_combos=len(rm.rate_options)))
                                 d["room_options"] = rgr.to_dict()
+                                d["room_options"]["ambiguous_match"] = True
+                                d["room_options"]["nearest_match_room_type_id"] = rm.room_type_id
                                 packet.log(
                                     f"room name {packet.requested_offer.room_name!r} matched "
                                     f"{rm.room_type_id} but ambiguously (score {rm.score:.2f}, "

@@ -470,7 +470,36 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         date_occ.append(occ_repr(packet.stay.occupancy))
     if date_occ:
         lines.append("📅 " + " · ".join(date_occ))
-    lines += ["", "Here's what's available:", ""]
+
+    if (rz.get("room_options") or {}).get("ambiguous_match") and groups:
+        # A specific room WAS requested, but not confidently enough to
+        # quote outright (see yta/web.py::_resolve()) -- name the
+        # algorithm's own nearest guess and the hotel's actual cheapest
+        # room up front, before the full list, rather than just dropping
+        # the customer into a bare list with no explanation.
+        def _callout_line(grp):
+            opt = min(grp.get("options") or [{}], key=lambda o: o.get("total_price") or float("inf"))
+            bits = [opt.get("meal_basis") or "Room Only"]
+            if opt.get("refundable") is True:
+                bits.append("Refundable")
+            elif opt.get("refundable") is False:
+                bits.append("Non-refundable")
+            ccy = opt.get("currency") or ""
+            price = opt.get("total_price") or 0
+            name = _clean_room_name(grp.get("room_name")) or "Room"
+            return f"{name} — {' · '.join(bits)} — {ccy} {price:,.2f}"
+
+        nearest = groups[0]   # _resolve() already sorts the nearest match first
+        cheapest = min(groups, key=lambda g: min(
+            (o.get("total_price") or float("inf")) for o in (g.get("options") or [{}])))
+        lines += ["", "I couldn't confidently match your room to one exact type — here's "
+                       "the nearest match and the cheapest option we have:"]
+        lines.append(f"🎯 Nearest match: {_callout_line(nearest)}")
+        if cheapest.get("room_type_id") != nearest.get("room_type_id"):
+            lines.append(f"💰 Cheapest available: {_callout_line(cheapest)}")
+        lines += ["", "Full list:", ""]
+    else:
+        lines += ["", "Here's what's available:", ""]
 
     n = 0
     for g in groups:

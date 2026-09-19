@@ -200,6 +200,19 @@ def test_ambiguous_match_not_in_cheapest_five_is_prepended_anyway(monkeypatch):
     assert [g["room_type_id"] for g in groups[1:]] == ["B1", "B2", "B3", "B4", "B5"]
 
 
+def test_ambiguous_match_room_options_carry_the_ambiguous_flag(monkeypatch):
+    opts = [
+        _opt("R1", "Budget Room", "Room Only", False, 10000, "b1"),
+        _opt("R2", "Luxury Room Facade View", "Room Only", False, 15000, "o1"),
+        _opt("R3", "LUXURY, COURTYARD VIEW", "Room Only", False, 20000, "o2"),
+    ]
+    _wire_common_mocks(monkeypatch, opts)
+    d = _resolve(_packet(room_name="Luxury room"))
+    ro = d["room_options"]
+    assert ro.get("ambiguous_match") is True
+    assert ro.get("nearest_match_room_type_id") == "R3"
+
+
 def test_no_room_name_path_logs_a_summary_line(monkeypatch):
     _wire_common_mocks(monkeypatch, _MIXED_TYPE_OPTIONS)
     pkt = _packet(room_name=None)
