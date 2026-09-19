@@ -773,13 +773,13 @@ def test_effective_missing_deal_intent_adds_room_name_back_when_a_hint_exists():
     assert v5._effective_missing(_Packet(room_name="Deluxe Room"), [], "deal") == []
 
 
-def test_effective_missing_deal_intent_does_not_force_room_with_no_hint_at_all():
-    # Neither room_name NOR description at all -- the customer plainly
-    # doesn't have a specific room in mind despite tapping "I have a
-    # deal". Falls through instead of stalling on a field they don't
-    # have -- same as bypassing the buttons entirely (intent=None).
+def test_effective_missing_deal_intent_strictly_requires_room_even_with_no_hint():
+    # Per explicit instruction: "I have a deal" always asks for a room
+    # when it's missing, even with zero hint (no description either) to
+    # go on -- reversed from an earlier, more lenient version that fell
+    # through to a hotel-based search in exactly this case.
     p = _Packet(room_name=None, description=None)
-    assert v5._effective_missing(p, [], "deal") == []
+    assert v5._effective_missing(p, [], "deal") == ["requested_offer.room_name"]
 
 
 def test_effective_missing_search_intent_drops_price():
@@ -798,7 +798,11 @@ def test_effective_missing_drops_price_whenever_room_name_is_absent_regardless_o
     # should never be required to get there, no matter what intent is.
     p = _Packet(room_name=None, description=None)
     assert v5._effective_missing(p, ["ota_benchmark.final_payable"], None) == []
-    assert v5._effective_missing(p, ["ota_benchmark.final_payable"], "deal") == []
+    # "deal" intent still strictly asks for the room itself (see the
+    # strict-requirement test above) -- it just never blocks on price
+    # while there's no room yet to compare against.
+    assert v5._effective_missing(p, ["ota_benchmark.final_payable"], "deal") \
+        == ["requested_offer.room_name"]
     assert v5._effective_missing(
         p, ["ota_benchmark.final_payable", "stay.rooms"], None) == ["stay.rooms"]
 
@@ -825,26 +829,19 @@ def test_have_deal_path_still_asks_for_a_room_when_a_hint_exists(sent, monkeypat
     assert v5._WA_SESSIONS["cust"]["missing"] == ["requested_offer.room_name"]
 
 
-def test_have_deal_path_falls_through_to_options_with_no_room_hint_at_all(sent, monkeypatch):
-    # Neither room_name nor description at all, despite tapping "I have a
-    # deal" -- rather than nagging for a room that was never coming, it
-    # proceeds exactly like the search path would.
+def test_have_deal_path_strictly_asks_for_a_room_even_with_no_hint_at_all(sent, monkeypatch):
+    # Per explicit instruction: "I have a deal" always asks for the room,
+    # even with zero hint to go on -- never silently falls through to a
+    # hotel-based search on this path (reversed from an earlier, more
+    # lenient version -- see _effective_missing's docstring).
     v5._PENDING_PATH["cust"] = "deal"
     monkeypatch.setattr("yta.pipeline.extract",
                          lambda *a, **kw: _Packet(missing=[], room_name=None, description=None))
-    monkeypatch.setattr(
-        "yta.web._resolve",
-        lambda packet: {"room_options": {"groups": [
-            {"room_type_id": "R1", "room_name": "Deluxe Room", "total_combos": 1, "options": [
-                {"option_id": "s1", "room_name": "Deluxe Room", "meal_basis": "Breakfast",
-                 "refundable": True, "currency": "INR", "total_price": 20000.0},
-            ]},
-        ]}},
-    )
     v5.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x", }])
-    assert v5._WA_SESSIONS["cust"]["state"] == "choosing_option"
-    assert not any(m[0] == "buttons" and "start_new_chat" in [bid for bid, _ in m[2]]
-                   for m in sent)   # never entered awaiting_field asking for a room
+    assert v5._WA_SESSIONS["cust"]["state"] == "awaiting_field"
+    assert v5._WA_SESSIONS["cust"]["missing"] == ["requested_offer.room_name"]
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "room" in body.lower()
 
 
 def test_search_hotel_path_proceeds_without_a_price(sent, monkeypatch):

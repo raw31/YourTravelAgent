@@ -300,16 +300,16 @@ def _effective_missing(packet, missing: list, intent: str | None) -> list:
     ONE additional expectation that path implies, without changing what
     schema.py itself considers mandatory for every other flow.
 
-    On "deal", room_name is only forced back in when there's SOME room
-    detail to go on (a description) but it didn't resolve to a clean
-    name -- worth one clarifying question. When there's NEITHER a
-    room_name NOR a description at all, the customer plainly doesn't have
-    a specific room in mind (they may have tapped "I have a deal" without
-    registering the distinction, or their screenshot just didn't include a
-    room selection) -- forcing the question every time just stalls the
-    conversation on a field they don't have. Falling through here (same
-    as intent=None) lets it proceed straight to the room-options list
-    instead of nagging for a room that was never coming.
+    On "deal", room_name is now STRICTLY required, unconditionally --
+    per explicit instruction, tapping "I have a deal" commits to that
+    flow, and a specific room is the whole point of a deal comparison.
+    (An earlier version of this only forced the question when a
+    description hint existed and fell through to a hotel-based search
+    otherwise -- reversed on purpose; "I have a deal" quietly becoming a
+    hotel search read as wrong for that path. A customer with no
+    specific room in mind should use "Search a hotel" instead -- that
+    path, and the no-button-tapped intent=None default, still fall
+    through to the room-options list exactly as before.)
 
     No room name at all, REGARDLESS of intent, also always drops the
     price requirement -- _resolve() already forks into a hotel-based
@@ -325,8 +325,15 @@ def _effective_missing(packet, missing: list, intent: str | None) -> list:
     if intent == "search":
         missing = [m for m in missing if m != "ota_benchmark.final_payable"]
     elif intent == "deal":
-        has_room_hint = packet.requested_offer.room_name or packet.requested_offer.description
-        if not packet.requested_offer.room_name and has_room_hint \
+        # Strict, per explicit instruction: tapping "I have a deal" means
+        # a specific room IS the point of this path -- always ask for one
+        # when it's missing, never silently fall through to a hotel-based
+        # search regardless of whether a description hint exists. (Was
+        # previously conditional on having SOME room hint to go on --
+        # reversed after live use showed "I have a deal" quietly turning
+        # into a hotel search felt wrong for that path specifically; the
+        # unconditional bypass below still applies to intent=None/"search".)
+        if not packet.requested_offer.room_name \
                 and "requested_offer.room_name" not in missing:
             missing = missing + ["requested_offer.room_name"]
     if not packet.requested_offer.room_name:
