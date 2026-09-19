@@ -43,6 +43,23 @@ def test_send_buttons_posts_interactive_button_payload(monkeypatch):
     assert titles == ["Option A", "Option B"]
 
 
+def test_send_image_posts_link_and_caption(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])
+    out = whatsapp.send_image("919999999999", "https://example.com/photo.jpg", caption="Nice hotel")
+    assert out["_status_code"] == 200
+    body = captured["json"]
+    assert body["type"] == "image"
+    assert body["image"] == {"link": "https://example.com/photo.jpg", "caption": "Nice hotel"}
+
+
+def test_send_image_without_caption_omits_the_field(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])
+    whatsapp.send_image("919999999999", "https://example.com/photo.jpg")
+    assert captured["json"]["image"] == {"link": "https://example.com/photo.jpg"}
+
+
 def test_send_buttons_never_sends_more_than_three(monkeypatch):
     captured = {}
     monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])

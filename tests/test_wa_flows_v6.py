@@ -35,6 +35,8 @@ def _clean_sessions():
 def sent(monkeypatch):
     messages = []
     monkeypatch.setattr(v6, "wa_send", lambda frm, text: messages.append(("text", text)))
+    monkeypatch.setattr(v6, "wa_send_image",
+                        lambda frm, url, caption=None: messages.append(("image", url, caption)))
 
     def _fake_send_buttons(to, body, buttons):
         messages.append(("buttons", body, buttons))
@@ -777,6 +779,29 @@ def test_not_cheaper_unrecognized_reply_reprompts_then_gives_up(sent, monkeypatc
     assert "cust" not in v6._WA_SESSIONS   # attempt 2 -- gave up
     kind, body, _ = sent[-1]   # the LAST message -- attempt 1's reprompt sent buttons too
     assert body == v6._ONBOARDING_CHOICE_TEXT
+
+
+def test_cover_image_sent_once_hotel_is_confidently_identified(sent, monkeypatch):
+    monkeypatch.setattr(
+        "yta.web._resolve",
+        lambda packet: {
+            "match": {"hotel_name": "Taj Santacruz", "cover_image": "https://example.com/taj.jpg"},
+            "room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+                {"option_id": "o1", "room_name": "Deluxe Room", "currency": "INR", "total_price": 28015.64},
+            ]},
+        },
+    )
+    v6._present_deal("cust", _Packet())
+    image_msgs = [m for m in sent if m[0] == "image"]
+    assert image_msgs == [("image", "https://example.com/taj.jpg", None)]
+    assert sent.index(image_msgs[0]) < len(sent) - 1   # sent before the rate message
+    assert sent[-1][0] == "buttons"
+
+
+def test_no_cover_image_sent_when_hotel_is_not_confidently_matched(sent, monkeypatch):
+    monkeypatch.setattr("yta.web._resolve", lambda packet: {"room_map": {"matched": False}})
+    v6._present_deal("cust", _Packet())
+    assert not any(m[0] == "image" for m in sent)
 
 
 def test_no_live_rate_offers_try_another_button(sent, monkeypatch):

@@ -186,6 +186,8 @@ class Candidate:
     city_score: float | None
     addr_score: float | None
     score: float
+    cover_image: str | None = None   # additive -- a hotel photo URL, for
+                                      # sending alongside a confident match
 
     def to_dict(self):
         return asdict(self)
@@ -370,7 +372,7 @@ def resolve(name: str, *, city: str | None = None, region: str | None = None,
                 geo_score=round(gs, 3) if gs is not None else None,
                 city_score=round(cs, 3) if cs is not None else None,
                 addr_score=round(as_, 3) if as_ is not None else None,
-                score=round(s, 3)))
+                score=round(s, 3), cover_image=r["cover_image"]))
 
         cands.sort(key=lambda c: c.score, reverse=True)
         top = cands[:limit]

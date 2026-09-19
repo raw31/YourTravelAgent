@@ -94,3 +94,20 @@ def test_result_is_auditable(con):
     assert d["candidates"][0]["name_score"] is not None
     assert d["candidates"][0]["geo_score"] is not None
     assert "layers" in d
+
+
+def test_match_carries_cover_image_through(con):
+    # For sending a hotel's photo alongside its rates once identified
+    # (yta.wa_flows v5/v6 _present_deal) -- the column has to actually
+    # survive resolve()'s SELECT * -> Candidate construction.
+    con.execute("UPDATE tj_hotels SET cover_image = ? WHERE tj_id = 1",
+                ("https://example.com/aloha.jpg",))
+    con.commit()
+    r = resolve("Aloha on the Ganges by Leisure Hotels", city="Rishikesh",
+                lat=30.13083, lng=78.32835, country="India", con=con)
+    assert r.match.cover_image == "https://example.com/aloha.jpg"
+
+
+def test_match_cover_image_is_none_when_not_set(con):
+    r = resolve("The Roseate Ganges", lat=30.13083, lng=78.32700, country="India", con=con)
+    assert r.match.cover_image is None

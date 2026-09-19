@@ -39,6 +39,18 @@ def wa_send(frm: str, text: str) -> dict:
     return result
 
 
+def wa_send_image(frm: str, image_url: str, caption: str | None = None) -> dict:
+    """Same logging discipline as wa_send() -- a hotel's cover photo,
+    sent as its own message right when the hotel is confidently
+    identified (see yta.hoteldb.resolver.Candidate.cover_image)."""
+    from yta import whatsapp
+    result = whatsapp.send_image(frm, image_url, caption=caption)
+    if result.get("_status_code") != 200:
+        print(f"[wa] SEND FAILED (image) to {frm}: status={result.get('_status_code')} "
+              f"error={result.get('error')}", flush=True)
+    return result
+
+
 def occ_field(r, name, default=None):
     """`stay.occupancy` holds real RoomOccupancy objects on a live packet,
     but plain dicts once something's gone through .to_dict()/JSON — accept

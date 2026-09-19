@@ -148,6 +148,29 @@ def send_text(to: str, body: str) -> dict:
     return out
 
 
+def send_image(to: str, image_url: str, caption: str | None = None) -> dict:
+    """A photo, sent as its own message. Takes a public `link`, not an
+    uploaded media id -- exactly the shape a hotel's own cover_image URL
+    (yta.hoteldb) already is, so there's no download/re-upload step."""
+    import requests
+    cfg = _cfg()
+    image: dict = {"link": image_url}
+    if caption:
+        image["caption"] = caption
+    r = requests.post(
+        f"{_GRAPH}/{cfg['api_version']}/{cfg['phone_number_id']}/messages",
+        headers={"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json"},
+        json={"messaging_product": "whatsapp", "to": to, "type": "image", "image": image},
+        timeout=15,
+    )
+    try:
+        out = r.json()
+    except ValueError:
+        out = {"raw": r.text}
+    out["_status_code"] = r.status_code
+    return out
+
+
 def send_buttons(to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
     """Interactive reply buttons — up to 3 tappable choices (Meta's own
     limit; a 4th is silently rejected by the API, so callers should never

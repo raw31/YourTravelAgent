@@ -180,7 +180,7 @@ import threading
 import time
 
 from yta.wa_shared import (
-    occ_repr, wa_send,
+    occ_repr, wa_send, wa_send_image,
     CHECKING_PHRASES as _CHECKING_PHRASES,
     FETCHING_PHRASES as _FETCHING_PHRASES,
     FOUND_OPENERS as _FOUND_OPENERS,
@@ -535,6 +535,13 @@ def _present_deal(frm: str, packet) -> None:
 
     wa_send(frm, random.choice(_FETCHING_PHRASES))
     resolution = _resolve(packet) if packet.hotel.name else None
+    # A cover photo, sent once the hotel itself is confidently identified
+    # (resolution["match"] is only ever set for a high/medium-band match --
+    # see yta.hoteldb.resolver.resolve) -- regardless of which of the two
+    # paths below actually shows the rates.
+    cover_image = ((resolution or {}).get("match") or {}).get("cover_image")
+    if cover_image:
+        wa_send_image(frm, cover_image)
     if (resolution or {}).get("room_options"):
         _present_option_choices(frm, packet, resolution)
         return
