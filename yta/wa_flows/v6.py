@@ -641,11 +641,13 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         cheapest = min(groups, key=lambda g: min(
             (o.get("total_price") or float("inf")) for o in (g.get("options") or [{}])))
         lines += ["", "I couldn't confidently match your room to one exact type — here's "
-                       "the nearest match and the cheapest option we have:"]
+                       "the nearest match and the cheapest option we have:", ""]
         lines.append(f"🎯 Nearest match: {_callout_line(nearest)}")
+        lines.append("")
         if cheapest.get("room_type_id") != nearest.get("room_type_id"):
             lines.append(f"💰 Cheapest available: {_callout_line(cheapest)}")
-        lines += ["", "Full list:", ""]
+            lines.append("")
+        lines += ["Full list:", ""]
     else:
         lines += ["", "Here's what's available:", ""]
 
