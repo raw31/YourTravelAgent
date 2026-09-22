@@ -256,6 +256,15 @@ _CHITCHAT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# yta.profiles.route()'s domain labels for MakeMyTrip's two link shapes
+# (its own site, and the app.mmyt.co AppsFlyer share-link domain).
+# Narrow, deliberate exception to the "zero per-OTA code" design -- this
+# isn't a parsing special-case, it's an infrastructure one: MakeMyTrip
+# blocks this server's automated access at the network level, confirmed
+# live (both Playwright rendering AND a plain HTTP fetch time out/reset
+# on its real hotel pages) -- no parsing improvement can fix that.
+_RENDER_BLOCKED_OTAS = {"mmyt", "makemytrip"}
+
 
 def _looks_like_a_query(text: str) -> bool:
     t = (text or "").strip()
@@ -738,8 +747,24 @@ def _run_extraction(frm: str, url, media, page_text: str | None = None,
             _WA_SESSIONS[frm] = {"state": "awaiting_field", "packet": packet, "missing": missing,
                                   "intent": intent, "unproductive_attempts": 0,
                                   "last_activity": time.time()}
-        whatsapp.send_buttons(frm, _found_and_ask_message(packet, missing),
-                               [("start_new_chat", "Start over")])
+        if url and not packet.hotel.name and (packet.source.ota or "").lower() in _RENDER_BLOCKED_OTAS:
+            # A known, narrow exception -- not a parsing special-case, an
+            # infrastructure one: MakeMyTrip actively blocks this server's
+            # automated access at the network level (verified live: both
+            # headless-browser rendering AND a plain HTTP fetch from this
+            # server time out/reset on MMT's real hotel pages). No amount
+            # of better parsing gets past that, so don't even try the
+            # generic "what's missing" ask -- tell the customer plainly
+            # and let them send a screenshot instead, which an MMT share
+            # generally has everything on anyway.
+            whatsapp.send_buttons(
+                frm, "I wasn't able to pull the details from that MakeMyTrip link — could "
+                     "you send a screenshot of the page instead, or just tell me the hotel "
+                     "name, dates, guests, and price?",
+                [("start_new_chat", "Start over")])
+        else:
+            whatsapp.send_buttons(frm, _found_and_ask_message(packet, missing),
+                                   [("start_new_chat", "Start over")])
         return
     # Everything needed came in on the first submission -- still show what
     # was actually read before quoting a price, same as the ask-for-more

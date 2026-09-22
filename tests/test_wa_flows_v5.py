@@ -45,9 +45,10 @@ class _Packet:
     missing_mandatory = []
 
     def __init__(self, missing=(), hotel_name="Test Hotel", room_name="Deluxe Room",
-                description=None):
+                description=None, ota="test"):
         self._still_missing = list(missing)
         self.hotel = type("H", (), {"name": hotel_name})()
+        self.source = type("Src", (), {"ota": ota})()
 
         class _Stay:
             check_in = "2026-09-21"
@@ -183,6 +184,59 @@ def test_free_text_query_with_missing_fields_opens_awaiting_field(sent, monkeypa
     assert v5._WA_SESSIONS["cust"]["state"] == "awaiting_field"
     body = next(m[1] for m in sent if m[0] == "buttons")
     assert "Test Hotel" in body
+
+
+def test_mmt_render_block_gets_a_tailored_message_not_the_generic_ask(sent, monkeypatch):
+    # Real, narrow infrastructure exception: MakeMyTrip blocks this
+    # server's automated access at the network level (confirmed live --
+    # both Playwright rendering and a plain HTTP fetch time out/reset).
+    # When a URL resolves to an MMT domain and hotel.name never came
+    # through, skip the generic "what's missing" ask and tell the
+    # customer plainly instead.
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://app.mmyt.co/Xm2V/in2ce1bl")
+    monkeypatch.setattr(
+        "yta.pipeline.extract",
+        lambda *a, **kw: _Packet(missing=["hotel.name", "stay.check_in"], hotel_name=None, ota="mmyt"))
+    v5.handle_batch("cust", [{"type": "text", "text": "https://app.mmyt.co/Xm2V/in2ce1bl"}])
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "MakeMyTrip" in body
+    assert "screenshot" in body.lower()
+    assert v5._WA_SESSIONS["cust"]["state"] == "awaiting_field"
+
+
+def test_mmt_domain_variant_also_gets_the_tailored_message(sent, monkeypatch):
+    mmt_url = "https://www.makemytrip.com/hotels/hotel-details?hotelId=1"
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: mmt_url)
+    monkeypatch.setattr(
+        "yta.pipeline.extract",
+        lambda *a, **kw: _Packet(missing=["hotel.name"], hotel_name=None, ota="makemytrip"))
+    v5.handle_batch("cust", [{"type": "text", "text": mmt_url}])
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "MakeMyTrip" in body
+
+
+def test_mmt_message_does_not_fire_when_hotel_name_was_actually_found(sent, monkeypatch):
+    # Even on an MMT domain, if the hotel name DID come through, the
+    # generic missing-fields ask is still the right one.
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://app.mmyt.co/Xm2V/in2ce1bl")
+    monkeypatch.setattr(
+        "yta.pipeline.extract",
+        lambda *a, **kw: _Packet(missing=["ota_benchmark.final_payable"],
+                                 hotel_name="Taj Santacruz", ota="mmyt"))
+    v5.handle_batch("cust", [{"type": "text", "text": "https://app.mmyt.co/Xm2V/in2ce1bl"}])
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "MakeMyTrip" not in body
+    assert "Taj Santacruz" in body
+
+
+def test_mmt_message_does_not_fire_for_other_otas(sent, monkeypatch):
+    monkeypatch.setattr("yta.whatsapp.find_url", lambda text: "https://www.booking.com/hotel/x.html")
+    monkeypatch.setattr(
+        "yta.pipeline.extract",
+        lambda *a, **kw: _Packet(missing=["hotel.name"], hotel_name=None, ota="booking"))
+    v5.handle_batch("cust", [{"type": "text", "text": "https://www.booking.com/hotel/x.html"}])
+    body = next(m[1] for m in sent if m[0] == "buttons")
+    assert "MakeMyTrip" not in body
 
 
 def test_free_text_with_no_recognizable_hotel_gets_a_soft_nudge_not_a_loop(sent, monkeypatch):
