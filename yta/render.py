@@ -429,7 +429,16 @@ def render(url: str, *,
         step("launching headless browser")
         browser, channel = _launch(p, prefer_chrome)
         res.browser_channel = channel
-        ctx = browser.new_context(user_agent=_UA, locale="en-US",
+        # en-IN, not en-US -- this server's IP genuinely geolocates to
+        # Sydney (the AWS instance's real region), so a site using IP
+        # geolocation for currency defaulting (the dominant signal on
+        # major OTAs) will still show AUD regardless of this. This is a
+        # cheap, safe nudge for whichever OTAs also weigh browser locale
+        # as a secondary signal -- not a full fix; a real one needs
+        # routing the request through an actual Indian IP (a proxy, or
+        # moving the instance's region, both bigger asks with real
+        # cost/risk of their own -- not done without an explicit call).
+        ctx = browser.new_context(user_agent=_UA, locale="en-IN",
                                   viewport={"width": 1366, "height": 900})
         page = ctx.new_page()
         # hard cap on every implicit wait (actionability checks, selectors,
