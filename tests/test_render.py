@@ -1,6 +1,9 @@
-"""render.py helpers — _json_digest, llm_context, _resolve_deferred_deeplink
-(no browser)."""
-from yta.render import RenderResult, _json_digest, _resolve_deferred_deeplink
+"""render.py helpers — _json_digest, llm_context, _resolve_deferred_deeplink,
+_force_booking_com_currency (no browser)."""
+from yta.render import (
+    RenderResult, _json_digest, _resolve_deferred_deeplink,
+    _force_booking_com_currency,
+)
 
 
 # -- _resolve_deferred_deeplink -------------------------------------------
@@ -42,6 +45,36 @@ def test_resolve_deferred_deeplink_returns_unchanged_on_network_failure(monkeypa
     monkeypatch.setattr("requests.get", _boom)
     url = "https://app.mmyt.co/Xm2V/in2ce1bl"
     assert _resolve_deferred_deeplink(url) == url
+
+
+# -- _force_booking_com_currency -------------------------------------------
+
+def test_force_booking_com_currency_appends_the_param(monkeypatch):
+    monkeypatch.delenv("TRIPJACK_CURRENCY", raising=False)
+    url = "https://www.booking.com/hotel/in/the-taj-mahal-palace-mumbai.html"
+    assert _force_booking_com_currency(url) == url + "?selected_currency=INR"
+
+
+def test_force_booking_com_currency_uses_existing_query_string(monkeypatch):
+    monkeypatch.delenv("TRIPJACK_CURRENCY", raising=False)
+    url = "https://www.booking.com/Share-GqKax8?checkin=2026-09-29"
+    assert _force_booking_com_currency(url) == url + "&selected_currency=INR"
+
+
+def test_force_booking_com_currency_respects_the_account_currency_env(monkeypatch):
+    monkeypatch.setenv("TRIPJACK_CURRENCY", "AED")
+    url = "https://www.booking.com/hotel/x.html"
+    assert _force_booking_com_currency(url) == url + "?selected_currency=AED"
+
+
+def test_force_booking_com_currency_does_not_duplicate_an_existing_param():
+    url = "https://www.booking.com/hotel/x.html?selected_currency=USD"
+    assert _force_booking_com_currency(url) == url
+
+
+def test_force_booking_com_currency_leaves_other_domains_untouched():
+    url = "https://www.makemytrip.com/hotels/hotel-details?hotelId=1"
+    assert _force_booking_com_currency(url) == url
 
 
 # a realistic slice of an OTA itinerary SPA payload: the per-room guest split

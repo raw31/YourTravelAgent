@@ -365,6 +365,35 @@ def _resolve_deferred_deeplink(url: str, *, timeout: float = 6.0) -> str:
     return url
 
 
+def _force_booking_com_currency(url: str) -> str:
+    """Booking.com defaults to IP-geolocated currency -- confirmed live
+    that this server's real AWS region (Sydney) makes it show AUD
+    instead of INR, same page, same customer's actual stay, just wrong
+    money. Also confirmed live that an explicit `selected_currency`
+    query param overrides that entirely (0 AUD mentions, 3 INR mentions
+    in the rendered page once added), and survives Booking.com's own
+    Share-XXXXX short links being appended before the redirect too --
+    no separate resolution step needed the way the AppsFlyer deep-link
+    case required.
+
+    A narrow, deliberate exception to "zero per-OTA code" -- this is a
+    genuine currency-correctness fix (the OTA price we read must be in
+    the same currency as our own quote to compare them at all), not
+    parsing logic, and it's scoped to exactly the one domain it was
+    verified against. Uses the same account-currency env var TripJack's
+    own client already defaults to (TRIPJACK_CURRENCY), so both prices
+    are always in the same currency by construction."""
+    import os
+    from urllib.parse import urlparse
+    if "booking.com" not in urlparse(url).netloc.lower():
+        return url
+    if "selected_currency=" in url:
+        return url
+    ccy = os.environ.get("TRIPJACK_CURRENCY", "INR")
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}selected_currency={ccy}"
+
+
 def render(url: str, *,
            wait: str = "domcontentloaded",
            settle_ms: int = 9000,
@@ -376,6 +405,7 @@ def render(url: str, *,
     from urllib.parse import urlparse
     sync_playwright = _require_playwright()
     url = _resolve_deferred_deeplink(url)
+    url = _force_booking_com_currency(url)
     res = RenderResult(url=url)
     keep = xhr_keep or _default_xhr_keep(urlparse(url).netloc.lower())
     step = on_step or (lambda _m: None)
