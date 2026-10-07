@@ -124,13 +124,30 @@ def test_onboarding_choice_states_the_mechanism_and_gives_an_example(sent):
     assert [bid for bid, _ in buttons] == ["have_deal", "search_hotel"]
 
 
-def test_onboarding_button_labels_are_customer_facing_not_jargon(sent):
+def test_onboarding_button_labels_say_what_the_guest_has_not_what_the_bot_does(sent):
+    # Owner 2026-10-07: "Help me find a hotel" reads as a city search (the bot can only
+    # price ONE specific hotel) and "I picked a room" did not say what happens next.
     v7.handle_batch("cust", [{"type": "text", "text": "hi"}])
     kind, body, buttons = sent[0]
-    titles = [t for _, t in buttons]
-    assert "I have a deal" not in titles and "Search a hotel" not in titles
-    assert any("room" in t.lower() for t in titles)
-    assert any("find" in t.lower() or "search" in t.lower() for t in titles)
+    assert [(i, t) for i, t in buttons] == [("have_deal", "Compare my price"), ("search_hotel", "Check a hotel")]
+    assert all(len(t) <= 20 for _, t in buttons)
+    # the body explains BOTH paths in plain words, including "one hotel, not a city"
+    assert "*Compare my price*" in body and "another site" in body and "beat the price" in body
+    assert "*Check a hotel*" in body and "you know the hotel" in body
+
+
+def test_the_search_prompt_asks_for_an_exact_hotel_and_says_cities_are_not_searchable(sent):
+    v7.handle_batch("cust", [{"type": "button_reply", "button_id": "search_hotel", "text": "x"}])
+    body = sent[0][1]
+    assert "exact hotel name" in body and "not a whole city" in body
+
+
+def test_a_city_only_message_is_asked_which_hotel_in_that_city(sent):
+    p = _Packet(hotel_name=None, missing=["hotel.name"])
+    p.hotel.city = "Delhi"
+    v7._send_ask("cust", p, ["hotel.name"], None)
+    body = sent[-1][1]
+    assert body.startswith("🏨 *Which hotel in Delhi?*") and "can't search all of Delhi yet" in body
 
 
 # -- finding 6/19: every message now leaves at least one tap --------------

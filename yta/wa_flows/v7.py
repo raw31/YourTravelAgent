@@ -323,14 +323,24 @@ _READABLE_TYPES = ("text", "image", "document", "button_reply")
 # examples, not framing alone. Button labels changed from internal jargon
 # ("I have a deal") to what the customer is actually choosing -- same two
 # `intent` values (deal/search) downstream, this is copy only.
+# The two starting paths, named for what the guest HAS, not for what the bot does
+# (owner feedback 2026-10-07: "Help me find a hotel" reads as a city search -- the
+# bot can only price a SPECIFIC hotel -- and "I picked a room" did not say what
+# happens next). Button titles are capped at 20 chars by WhatsApp.
+_BTN_DEAL = "Compare my price"      # button id "have_deal"
+_BTN_SEARCH = "Check a hotel"       # button id "search_hotel"
+
 _ONBOARDING_CHOICE_TEXT = (
-    "Hi! 👋 Found a hotel you like? Before you book, let me take a quick "
-    "look for you — I usually find the same room for 10–15% less.\n\n"
-    "Send me the link or a screenshot whenever you're ready, or tap "
-    "below to get started:"
+    "Hi! 👋 I check hotel rates and often find the same room for 10–15% less.\n\n"
+    "How would you like to start?\n\n"
+    f"• *{_BTN_DEAL}* — you found a room on another site. Send me its link or a "
+    "screenshot and I'll check if I can beat the price.\n"
+    f"• *{_BTN_SEARCH}* — you know the hotel. Tell me its name, dates and guests "
+    "and I'll show you live room rates.\n\n"
+    "You can also just send a link or screenshot any time."
 )
 
-# Follow-up once "I picked a room" is tapped -- a specific room
+# Follow-up once "Compare my price" is tapped -- a specific room
 # really is expected on this path (see _effective_missing). Opens with a
 # concrete example (finding 1) before the requirements list, instead of
 # only the list.
@@ -348,18 +358,24 @@ _ONBOARDING_TEXT = (
     "to book through me."
 )
 
-# Follow-up once "Help me find a hotel" is tapped -- deliberately never
+# Follow-up once "Check a hotel" is tapped -- deliberately never
 # asks for a room or a price: there's no OTA deal to compare against on
 # this path (see _effective_missing), just a live look at what's
 # available. Gives a concrete example (finding 1) instead of only naming
 # the fields.
+def _search_example_year() -> int:
+    from datetime import date
+    t = date.today()
+    return t.year + (1 if t.month >= 11 else 0)
+
+
 _SEARCH_TEXT = (
     "Great — send me:\n"
-    "• Hotel name\n"
+    "• The *exact hotel name* (I can check one hotel at a time, not a whole city)\n"
     "• Your dates\n"
     "• Number of guests\n\n"
-    "For example: \"Taj Santacruz, Mumbai, 12-14 Oct, 2 adults\"\n\n"
-    "I'll show you a few live room options to choose from — no need to "
+    f"For example: \"Taj Santacruz, Mumbai, 12-14 Dec {_search_example_year()}, 2 adults\"\n\n"
+    "I'll show you the live room options to choose from — no need to "
     "pick a room first."
 )
 
@@ -444,8 +460,7 @@ def _send_onboarding_choice(frm: str) -> None:
     # intent/routing decision keys off the id, never the label, so
     # relabeling for clarity (finding 2) is pure copy, zero logic change.
     wa_send_buttons(frm, _ONBOARDING_CHOICE_TEXT,
-                           [("have_deal", "I picked a room"),
-                            ("search_hotel", "Help me find a hotel")])
+                           [("have_deal", _BTN_DEAL), ("search_hotel", _BTN_SEARCH)])
 
 
 def _handle_human_help(frm: str, session: dict | None) -> None:
@@ -481,7 +496,7 @@ def _handle_human_help(frm: str, session: dict | None) -> None:
         wa_send_buttons(frm, "Got it — I'll take a personal look and message you here shortly. "
                              "In the meantime, you can share a hotel link, a screenshot, or just "
                              "the hotel name and dates, and I'll pass it straight along.",
-                        [("have_deal", "I picked a room"), ("search_hotel", "Help me find a hotel")])
+                        [("have_deal", _BTN_DEAL), ("search_hotel", _BTN_SEARCH)])
 
 
 def _text_of(items: list) -> str:
@@ -1116,7 +1131,8 @@ _ASK_KIND = {"hotel.name": "hotel", "stay.check_in": "dates", "stay.check_out": 
              "requested_offer.room_name": "room", "ota_benchmark.final_payable": "price"}
 _ASK_TEXT = {
     "hotel": ("🏨 *Which hotel is this?*",
-              "Type the name as shown on the page, e.g. *Taj Santacruz, Mumbai* — or send a screenshot."),
+              "Type the exact hotel name, e.g. *Taj Santacruz, Mumbai* — I can check one hotel at a "
+              "time, not a whole city. Or send a screenshot."),
     "dates": ("📅 *What are your check-in and check-out dates?*",
               "Just type them, e.g. *17 Dec – 18 Dec 2026* — or send a fuller screenshot."),
     "guests": ("👥 *How many rooms, and how many guests in each?*",
@@ -1148,8 +1164,11 @@ def _missing_kinds(missing: list) -> list:
     return out
 
 
-def _assumption_sentence(kinds: list) -> str:
-    """What "Show my rate anyway" will do, spelled out BEFORE the guest taps."""
+def _assumption_sentence(kinds: list, has_price: bool = True) -> str:
+    """What "Show my rate anyway" will do, spelled out BEFORE the guest taps.
+    `has_price`: the guest gave an OTA price to compare with (the "I picked a
+    room" path); on the "find me a hotel" path there is none, so no comparison
+    is mentioned."""
     parts = []
     if "guests" in kinds:
         parts.append("assume *1 room, 2 adults*")
@@ -1157,7 +1176,7 @@ def _assumption_sentence(kinds: list) -> str:
         parts.append("show *all available rooms*")
     if "price" in kinds:
         parts.append("show our rate *without comparing* it to your price")
-    if "guests" in kinds and "price" not in kinds:
+    if "guests" in kinds and "price" not in kinds and has_price:
         parts.append("skip the price comparison, since the guests may differ")
     return "I'll " + ", ".join(parts[:-1]) + (" and " if len(parts) > 1 else "") + parts[-1] if parts else ""
 
@@ -1194,10 +1213,17 @@ def _ask_body(packet, missing: list, clarify: str | None = None) -> str:
             # children, and how old?"). With several open it tends to rattle them
             # all off in one long sentence -- the per-field questions are cleaner.
             question = f"❓ *{clarify.strip().rstrip('?')}?*"
+        city = (getattr(packet.hotel, "city", None) or "").strip()
+        if kind == "hotel" and city:
+            # They named a place ("Delhi", "hotels in Goa"), not a hotel.
+            question = f"🏨 *Which hotel in {city}?*"
+            hint = ("Send the exact hotel name, e.g. *Taj Santacruz, Mumbai* — I can check one hotel at "
+                    "a time, I can't search all of " + city + " yet.")
         parts.append(f"{question}\n{hint}")
     body = "\n\n".join(parts)
     if _can_show_anyway(missing, packet):
-        body += f"\n\nOr tap *Show my rate anyway* — {_assumption_sentence(kinds)}."
+        has_price = bool(getattr(packet.ota_benchmark, "final_payable", None))
+        body += f"\n\nOr tap *Show my rate anyway* — {_assumption_sentence(kinds, has_price)}."
     return body[:1000]
 
 
@@ -1898,7 +1924,7 @@ def _run_batch_once(frm: str, items: list, session, *, allow_retry: bool) -> Non
             wa_send_buttons(
                 frm, "That offer has expired — I've refreshed in the meantime. Send me the "
                      "link or screenshot again and I'll recheck it right away.",
-                [("have_deal", "I picked a room"), ("search_hotel", "Help me find a hotel")])
+                [("have_deal", _BTN_DEAL), ("search_hotel", _BTN_SEARCH)])
             return
 
         if session is None:

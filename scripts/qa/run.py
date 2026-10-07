@@ -614,6 +614,126 @@ def s30(r: Run):
     r.check(any(m.kind == "list" for m in new), "did not list the rooms")
 
 
+def open_search(r: Run):
+    r.do("say", "hi")
+    r.do("tap", "search_hotel")
+
+
+def _list_of(new):
+    return next((m for m in new if m.kind == "list"), None)
+
+
+@scenario("S31", "SEARCH flow: hotel only -> ONE message asks dates + guests (question first, no recap) -> room list")
+def s31(r: Run):
+    open_search(r)
+    new = r.do("say", TAJ)
+    ask = new[-1]
+    r.check(ask.text.startswith("📅 *What are your check-in and check-out dates?*"), f"question not first: {ask.text[:60]!r}")
+    r.check("👥 *How many rooms, and how many guests in each?*" in ask.text, "guests not asked in the SAME message")
+    r.check("price" not in ask.text.lower() and "room type" not in ask.text.lower(),
+            "asked for a price/room on the search path (there is no OTA deal to compare)")
+    r.check("Taj Santacruz" not in ask.text, "follow-up repeats the stay details")
+    r.check("show_anyway" not in r.last_ids(), "'show anyway' offered although dates are missing")
+    new = r.do("say", f"17 dec to 18 dec {FUT}, 2 adults 1 room")
+    lst = _list_of(new)
+    r.check(lst is not None, "no room list after dates + guests")
+    if lst:
+        r.check("starting from" in lst.text.lower(), "no price anchor")
+
+
+@scenario("S32", "SEARCH flow: year-less typed dates -> year buttons -> room list")
+def s32(r: Run):
+    open_search(r)
+    new = r.do("say", f"{TAJ} 22 dec se 24 dec, 2 adults")
+    r.check(new[-1].text.startswith("📅 *Which year is 22 Dec – 24 Dec?*"), f"no year question: {new[-1].text[:70]!r}")
+    r.check({"year_0", "year_1"} <= set(r.last_ids()), f"year buttons missing: {r.last_ids()}")
+    r.check(len(r.w.tj_calls) == 0, "searched before the year was known")
+    new = r.do("tap", "year_1")
+    r.check(_list_of(new) is not None, "no room list after the year tap")
+    r.check(r.tj_checkin() and r.tj_checkin()[0].startswith(str(FUT)) and r.tj_checkin()[0].endswith("-12-22"),
+            f"TripJack dates {r.tj_checkin()}")
+
+
+@scenario("S33", "SEARCH flow: '4 adults, 2 rooms' is never split by guess")
+def s33(r: Run):
+    open_search(r)
+    new = r.do("say", f"{TAJ} 17 Dec {FUT} to 18 Dec {FUT}, 4 adults 2 rooms")
+    r.check(len(r.w.tj_calls) == 0, "priced an assumed even split")
+    r.check("split across the 2 rooms" in new[-1].text, f"split not asked: {new[-1].text[:80]!r}")
+    new = r.do("say", "2 adults in each room")
+    r.check(_list_of(new) is not None, "no room list after the split")
+    if r.w.tj_calls:
+        r.check([x.get("adults") for x in (r.w.tj_calls[0].get("rooms") or [])] == [2, 2], f"rooms {r.w.tj_calls[0].get('rooms')}")
+
+
+@scenario("S34", "SEARCH flow: 'Show my rate anyway' for missing guests -> assumption stated, no price-comparison talk")
+def s34(r: Run):
+    open_search(r)
+    new = r.do("say", f"{TAJ} 17 Dec {FUT} to 18 Dec {FUT}")
+    r.check(new[-1].text.startswith("👥 *How many rooms, and how many guests in each?*"), f"question not first: {new[-1].text[:60]!r}")
+    r.check("show_anyway" in r.last_ids(), "no 'Show my rate anyway'")
+    r.check("assume *1 room, 2 adults*" in new[-1].text, "assumption not stated up front")
+    r.check("comparison" not in new[-1].text.lower() and "comparing" not in new[-1].text.lower(),
+            "talks about a price comparison on a path with no price")
+    new = r.do("tap", "show_anyway")
+    lst = _list_of(new)
+    r.check(lst is not None, "no room list after Show my rate anyway")
+    if lst:
+        r.check("Assumed:" in lst.text and "1 room, 2 adults" in lst.text, "assumption not printed with the list")
+    if r.w.tj_calls:
+        r.check([x.get("adults") for x in (r.w.tj_calls[0].get("rooms") or [])] == [2], "assumed guests not sent as 1 room, 2 adults")
+
+
+@scenario("S35", "SEARCH flow: fuzzy hotel name is confirmed before any list")
+def s35(r: Run):
+    open_search(r)
+    new = r.do("say", f"Taj Mumbai 17 Dec {FUT} to 18 Dec {FUT}, 2 adults")
+    r.check(r.state() == "confirming_hotel", f"state {r.state()!r}")
+    r.check("is the hotel" in new[-1].text.lower(), "no hotel confirmation")
+    new = r.do("tap", "hotel_yes")
+    r.check(_list_of(new) is not None, "no room list after confirming the hotel")
+
+
+@scenario("S36", "SEARCH flow: unknown hotel / supplier outage are reported honestly")
+def s36(r: Run):
+    open_search(r)
+    new = r.do("say", f"Zzyzx Nowhere Inn Mumbai 17 Dec {FUT} to 18 Dec {FUT}, 2 adults")
+    r.check(r.has(new, "couldn't find"), "unknown hotel not reported as unknown")
+    r.w.tj_mode = "error"
+    r.do("say", "hi")
+    r.do("tap", "search_hotel")
+    new = r.do("say", f"{TAJ} 17 Dec {FUT} to 18 Dec {FUT}, 2 adults")
+    r.check(r.has(new, "trouble reaching"), "supplier outage reported as something else")
+    r.check("try_again" in r.last_ids(), "no Try again")
+
+
+@scenario("S37", "SEARCH flow: pick a room -> plain rate (no saving claim) -> confirm / decline; explore keeps cheapest first")
+def s37(r: Run):
+    open_search(r)
+    new = r.do("say", f"{TAJ} 17 Dec {FUT} to 18 Dec {FUT}, 2 adults 1 room")
+    lst = _list_of(new)
+    r.check(lst is not None, "no list")
+    if not lst:
+        return
+    new = r.do("tap", lst.rows[1][0])
+    r.check(r.state() == "presented" and not r.has(new, "better rate") and r.has(new, "pocket stays price"),
+            "pick did not give a plain rate")
+    new = r.do("tap", "explore_other_rooms")
+    r.check(_list_of(new) is not None, "no list from Explore other rooms on the search path")
+    new = r.do("tap", _list_of(new).rows[0][0])
+    r.do("tap", "confirm_book", allow_text_end=True)
+    r.check(len(r.new_leads("confirmed")) == 1, "lead not recorded for a search-path booking")
+
+
+@scenario("S38", "COLD start (no button tapped): a hotel + dates + guests message works like the search flow")
+def s38(r: Run):
+    new = r.do("say", f"{TAJ} 17 Dec {FUT} to 18 Dec {FUT}, 2 adults 1 room")
+    r.check(_list_of(new) is not None, "cold message with no room did not lead to a room list")
+    r.do("say", "hi")
+    new = r.do("say", f"{TAJ}")
+    r.check(new[-1].text.startswith("📅"), f"cold hotel-only message not asked for dates first: {new[-1].text[:60]!r}")
+
+
 # ---------------------------------------------------------------- explorer
 EXPLORE_SETUPS = {
     "onboarding": [("say", "hi")],
