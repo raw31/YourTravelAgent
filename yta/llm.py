@@ -135,11 +135,30 @@ def active_label() -> str:
 def complete(system: str, user: str, max_tokens: int = 1500, *,
              media: list | None = None, provider: str | None = None,
              retries: int = 2) -> tuple[str, str, str]:
-    """Returns (raw_text, provider, model). `provider=None` picks the primary
-    for the request kind. Raises SizeLimitError / LLMUnavailable / the
-    provider's own error."""
-    if provider is None:
-        provider = provider_chain(media=bool(media))[0]
+    """Returns (raw_text, provider, model).
+
+    `provider=None` (the default) means "get me an answer": every provider in
+    the chain for this kind of request is tried in order -- text: Groq, then
+    Gemini (which itself fails over across every configured key and model);
+    vision: Gemini, then Anthropic -- and only when ALL of them failed is the
+    last error raised. An explicit `provider` is used as-is (callers such as
+    the extraction pipeline run their own chain loop and must not double up)."""
+    if provider is not None:
+        return _complete_one(system, user, max_tokens, media, provider, retries)
+    chain = provider_chain(media=bool(media))
+    last = None
+    for prov in chain:
+        try:
+            return _complete_one(system, user, max_tokens, media, prov, retries)
+        except Exception as e:  # noqa: BLE001 -- any provider failure -> next provider
+            last = e
+            print(f"[llm] {prov} failed ({type(e).__name__}: {str(e)[:100]}) -- "
+                  f"{'trying the next provider' if prov != chain[-1] else 'no providers left'}",
+                  flush=True)
+    raise last if last is not None else LLMUnavailable("no LLM provider is configured")
+
+
+def _complete_one(system, user, max_tokens, media, provider, retries):
     if not _key(provider):
         raise LLMUnavailable(f"No key for provider {provider!r}")
     model = _model(provider)
@@ -159,7 +178,38 @@ def complete(system: str, user: str, max_tokens: int = 1500, *,
                           max_tokens, retries), provider, model
 
 
+_KEY_SKIP_UNTIL: dict = {}        # (provider, key-suffix) -> epoch seconds the key is skipped until
+_KEY_BREAKER_SEC = 120
+_QUOTA_MARKERS = ("tokens per", "tpd", "tpm", "rate limit reached", "requests per day")
+
+
 def _openai_compat(provider, system, user, model, key, max_tokens, retries):
+    """One request against an OpenAI-compatible provider, trying every
+    configured key for it (e.g. GROQ_API_KEY, GROQ_API_KEY_2) until one
+    answers. A key that hit its per-minute/day quota is skipped for a couple of
+    minutes; a bad generation or other error just moves on to the next key.
+    Only when every key failed does the error propagate (and complete() then
+    fails over to the next provider)."""
+    keys = api_keys(_KEY_ENV[provider], key)
+    last = None
+    for k in keys:
+        slot = (provider, k[-6:])
+        if time.time() < _KEY_SKIP_UNTIL.get(slot, 0):
+            continue
+        try:
+            return _openai_compat_one(provider, system, user, model, k, max_tokens, retries)
+        except SizeLimitError as e:
+            last = e
+            if any(m in str(e).lower() for m in _QUOTA_MARKERS):      # THIS key is out of quota
+                _KEY_SKIP_UNTIL[slot] = time.time() + _KEY_BREAKER_SEC
+        except Exception as e:  # noqa: BLE001 -- bad generation, 5xx, network: try the next key
+            last = e
+    if last is None:
+        last = LLMUnavailable(f"every {provider} key is cooling down after recent quota errors")
+    raise last
+
+
+def _openai_compat_one(provider, system, user, model, key, max_tokens, retries):
     from openai import OpenAI, RateLimitError, BadRequestError, APIStatusError
     client = OpenAI(api_key=key, base_url=_OPENAI_COMPAT_BASE.get(provider))
     kwargs = {"response_format": {"type": "json_object"}} \
@@ -212,12 +262,11 @@ def _anthropic(system, user, media, model, key, max_tokens):
     return r.content[0].text
 
 
-def gemini_keys(primary: str | None = None) -> list:
-    """Every configured Gemini key, primary first, de-duplicated:
-    GOOGLE_API_KEY, then GOOGLE_API_KEYS (comma-separated), then
-    GOOGLE_API_KEY_2 .. GOOGLE_API_KEY_9. A key hitting its free-tier quota
-    (429) or hanging must not take every screenshot down with it -- vision is
-    Gemini-only, so these fallbacks are the only safety net for images."""
+def api_keys(env_name: str, primary: str | None = None) -> list:
+    """Every configured key for a provider, primary first, de-duplicated:
+    <ENV>, then <ENV>S (comma-separated, e.g. GOOGLE_API_KEYS), then
+    <ENV>_2 .. <ENV>_9. A key hitting its quota (429) or hanging must not take
+    every request down with it."""
     keys: list = []
 
     def add(k):
@@ -225,12 +274,19 @@ def gemini_keys(primary: str | None = None) -> list:
         if k and k not in keys:
             keys.append(k)
     add(primary)
-    add(os.environ.get("GOOGLE_API_KEY"))
-    for k in (os.environ.get("GOOGLE_API_KEYS") or "").split(","):
+    add(os.environ.get(env_name))
+    base = env_name[:-4] if env_name.endswith("_KEY") else env_name
+    for k in (os.environ.get(f"{base}_KEYS") or os.environ.get(f"{env_name}S") or "").split(","):
         add(k)
     for n in range(2, 10):
-        add(os.environ.get(f"GOOGLE_API_KEY_{n}"))
+        add(os.environ.get(f"{env_name}_{n}"))
     return keys
+
+
+def gemini_keys(primary: str | None = None) -> list:
+    """GOOGLE_API_KEY, GOOGLE_API_KEYS (comma-separated), GOOGLE_API_KEY_2..9.
+    Vision is Gemini-only, so these fallbacks are the only safety net for images."""
+    return api_keys("GOOGLE_API_KEY", primary)
 
 
 def _gemini(system, parts, model, key, max_tokens, retries=1):
