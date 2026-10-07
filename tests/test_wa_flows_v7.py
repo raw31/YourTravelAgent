@@ -133,7 +133,7 @@ def test_onboarding_button_labels_say_what_the_guest_has_not_what_the_bot_does(s
     assert all(len(t) <= 20 for _, t in buttons)
     # the body explains BOTH paths in plain words, including "one hotel, not a city"
     assert "*Compare my price*" in body and "another site" in body and "beat the price" in body
-    assert "*Check a hotel*" in body and "you know the hotel" in body
+    assert "*Check a hotel*" in body and "already know the hotel" in body
 
 
 def test_the_search_prompt_asks_for_an_exact_hotel_and_says_cities_are_not_searchable(sent):

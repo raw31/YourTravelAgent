@@ -331,13 +331,14 @@ _BTN_DEAL = "Compare my price"      # button id "have_deal"
 _BTN_SEARCH = "Check a hotel"       # button id "search_hotel"
 
 _ONBOARDING_CHOICE_TEXT = (
-    "Hi! 👋 I check hotel rates and often find the same room for 10–15% less.\n\n"
-    "How would you like to start?\n\n"
-    f"• *{_BTN_DEAL}* — you found a room on another site. Send me its link or a "
-    "screenshot and I'll check if I can beat the price.\n"
-    f"• *{_BTN_SEARCH}* — you know the hotel. Tell me its name, dates and guests "
-    "and I'll show you live room rates.\n\n"
-    "You can also just send a link or screenshot any time."
+    "Hi! 👋 Found a hotel you like? Before you book, let me take a quick "
+    "look for you — I usually find the same room for 10–15% less.\n\n"
+    "Where would you like to start?\n\n"
+    f"• *{_BTN_DEAL}* — found a room on another site? Send me its link or a "
+    "screenshot and I'll see if I can beat the price 😊\n"
+    f"• *{_BTN_SEARCH}* — already know the hotel? Tell me its name, dates and "
+    "guests, and I'll show you live room rates.\n\n"
+    "Or just send a link or screenshot any time — I'm happy to help!"
 )
 
 # Follow-up once "Compare my price" is tapped -- a specific room
