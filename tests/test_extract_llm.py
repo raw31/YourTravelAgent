@@ -54,7 +54,7 @@ def test_normal_dict_response_still_works(monkeypatch):
 
 def test_clarification_fails_over_to_the_next_provider(monkeypatch):
     from yta import extract_llm, llm
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
 
     def fake_complete(system, user, max_tokens=0, media=None, provider=None, **kw):
         if provider == "groq":
@@ -67,7 +67,7 @@ def test_clarification_fails_over_to_the_next_provider(monkeypatch):
 
 def test_clarification_reports_not_ok_when_every_provider_fails(monkeypatch):
     from yta import extract_llm, llm
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
 
     def boom(*a, **kw):
         raise RuntimeError("504")
@@ -79,6 +79,6 @@ def test_clarification_reports_not_ok_when_every_provider_fails(monkeypatch):
 
 def test_a_reply_that_answers_nothing_is_ok_not_a_failure(monkeypatch):
     from yta import extract_llm, llm
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq"])
     monkeypatch.setattr(llm, "complete", lambda *a, **kw: ("{}", "groq", "m"))
     assert extract_llm.extract_clarification_ex(["stay.occupancy"], "hmm") == ({}, None, True)

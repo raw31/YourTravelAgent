@@ -303,13 +303,14 @@ def extract_clarification_ex(missing_paths: list, reply_text: str,
     # model) spends part of its token budget on internal reasoning before the
     # JSON, so 700 is comfortably above what this small a task needs.
     try:
-        chain = [provider] if provider else llm.provider_chain(media=bool(media))
+        chain = [provider] if provider else llm.provider_chain(media=bool(media), stage="vision" if media else "clarify")
     except Exception:  # noqa: BLE001 -- no provider configured at all
         return {}, None, False
     data = None
     for prov in chain:
         try:
-            raw, _, _ = llm.complete(system, user, max_tokens=700, media=media, provider=prov)
+            raw, _, _ = llm.complete(system, user, max_tokens=700, media=media, provider=prov,
+                                     stage="vision" if media else "clarify")
             raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
             parsed = json.loads(raw)
         except Exception:  # noqa: BLE001 -- fail over to the next provider
@@ -378,7 +379,8 @@ def extract(context: str | None = None, url: str = "",
         user = url_block + f"=== PAGE CONTENT ===\n{context or '(none — rely on the URL)'}"
 
     raw, provider, model = llm.complete(SYSTEM, user, max_tokens=1800,
-                                        media=media, provider=provider)
+                                        media=media, provider=provider,
+                                        stage="vision" if media else "text_extract")
 
     raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
     data = json.loads(raw)   # let a bad parse raise — caller handles

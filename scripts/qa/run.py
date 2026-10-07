@@ -296,7 +296,7 @@ def s7(r: Run):
     r.check(lst is not None, "unmatched room did not fall back to a room list")
     if lst:
         r.check("starting from" in lst.text.lower(), "no price anchor on unmatched-room list")
-        new = r.do("tap", lst.rows[-1][0])        # not the nearest match (row 1) -> a different room
+        new = r.do("tap", lst.rows[0][0])         # the cheapest row -- not the (pricier) nearest match -> a different room
         r.check(not r.has(new, "better rate") and not r.has(new, "you save"),
                 "claimed a saving for a room the OTA price was never for")
         r.check(r.has(new, "pocket stays price"), "plain-rate message missing")

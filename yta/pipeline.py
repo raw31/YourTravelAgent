@@ -225,7 +225,7 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
         chain = []
     else:
         try:
-            chain = llm.provider_chain(media=bool(media))
+            chain = llm.provider_chain(media=bool(media), stage="vision" if media else "text_extract")
             pkt.log(f"parsing the booking with the LLM ({' → '.join(chain)})")
         except llm.LLMUnavailable as e:
             pkt.warnings.append(str(e))

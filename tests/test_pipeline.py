@@ -414,7 +414,7 @@ def _llm_result(provider="gemini"):
 def test_extract_fails_over_when_a_provider_raises_an_arbitrary_error(monkeypatch):
     from yta import extract_llm, llm
     from yta.pipeline import extract
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
 
     def fake(context, url="", media=None, provider=None):
         if provider == "groq":
@@ -429,7 +429,7 @@ def test_extract_fails_over_when_a_provider_raises_an_arbitrary_error(monkeypatc
 def test_a_provider_outage_error_no_longer_aborts_extraction(monkeypatch):
     from yta import extract_llm, llm
     from yta.pipeline import extract
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
 
     def fake(context, url="", media=None, provider=None):
         if provider == "groq":
@@ -444,7 +444,7 @@ def test_when_every_provider_fails_the_packet_says_so_after_one_more_pass(monkey
     from yta import extract_llm, llm
     from yta.pipeline import extract
     import yta.pipeline as pl
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
     monkeypatch.setattr(pl.time, "sleep", lambda s: None)
     calls = []
 
@@ -461,7 +461,7 @@ def test_a_transient_failure_that_recovers_on_the_second_pass_is_a_success(monke
     from yta import extract_llm, llm
     from yta.pipeline import extract
     import yta.pipeline as pl
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq"])
     monkeypatch.setattr(pl.time, "sleep", lambda s: None)
     n = {"i": 0}
 

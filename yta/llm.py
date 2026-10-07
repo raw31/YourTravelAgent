@@ -173,10 +173,51 @@ def provider_healthy(provider: str) -> bool:
     return any(not llm_pool.is_parked(s) for s in slots) if slots else True
 
 
-def provider_chain(media: bool = False) -> list[str]:
-    """Providers to try, in order, for this kind of request — primary first
-    then the fallbacks that actually have a key."""
-    order = _VISION_PRIORITY if media else _TEXT_PRIORITY
+# --------------------------------------------------------------------------
+# Per-stage defaults: every LLM call site names its STAGE, and each stage uses
+# whatever is best suited for that job (owner, 2026-10-07: "decide what model does
+# best for what work and make that the default for that stage"). Keys rotate
+# INSIDE a provider/model (same behaviour every time); the other provider is the
+# fallback in both directions; a parked provider/slot moves to the end but is
+# still tried last.
+#
+#   vision        screenshot / PDF -> fields. Only Gemini (and Anthropic, if keyed)
+#                 can read images. Gemini's accurate model first, the lighter one
+#                 only as a last resort.
+#   text_extract  typed message / page text -> fields. Groq: fast, JSON mode,
+#                 validated for months. Gemini when every Groq key failed -- its
+#                 FAST model first (the thinking model can take 15-50s).
+#   clarify       parsing a short reply ("2 adults in each room"). Same as above.
+#   room_judge    "are these the same room?" -- low volume, accuracy matters (a
+#                 lenient judge confirmed a wrong room in QA): Groq's larger
+#                 reasoning model first; Gemini's accurate model as the fallback.
+# --------------------------------------------------------------------------
+STAGES = {
+    "vision":       {"providers": ["gemini", "anthropic"], "gemini_models": ["flash", "lite"]},
+    "text_extract": {"providers": ["groq", "gemini", "grok", "openai", "anthropic"], "gemini_models": ["lite", "flash"]},
+    "clarify":      {"providers": ["groq", "gemini", "grok", "openai", "anthropic"], "gemini_models": ["lite", "flash"]},
+    "room_judge":   {"providers": ["groq", "gemini", "grok", "openai", "anthropic"], "gemini_models": ["flash", "lite"]},
+}
+
+
+def gemini_model_order(stage: str | None, media: bool = False) -> list:
+    """Concrete Gemini model names for this stage, best first."""
+    st = STAGES.get(stage or ("vision" if media else "text_extract"), STAGES["text_extract"])
+    names = {"flash": _model("gemini"), "lite": _GEMINI_FALLBACK}
+    out = []
+    for k in st["gemini_models"]:
+        if names[k] not in out:
+            out.append(names[k])
+    return out
+
+
+def provider_chain(media: bool = False, stage: str | None = None) -> list[str]:
+    """Providers to try, in order, for this stage -- the stage's best-suited
+    provider first, then the others that actually have a key (the other one is
+    the fallback in both directions). Vision requests only ever chain through
+    vision-capable providers."""
+    stage = stage or ("vision" if media else "text_extract")
+    order = list(STAGES.get(stage, STAGES["text_extract"])["providers"])
     forced = os.environ.get("LLM_PROVIDER", "").strip().lower()
     if forced and forced in order and _key(forced):
         order = [forced] + [p for p in order if p != forced]
@@ -185,14 +226,9 @@ def provider_chain(media: bool = False) -> list[str]:
         chain = [p for p in chain if p in _VISION_PRIORITY]
     if not chain:
         (resolve_vision if media else resolve)()   # raises the helpful message
-    pinned = bool(forced and forced in order and _key(forced))
     healthy = [p for p in chain if provider_healthy(p)]
     parked = [p for p in chain if p not in healthy]
-    if not media and not pinned and len(healthy) > 1:
-        # Mix text traffic across providers so neither burns its daily quota
-        # alone. (Vision has one capable provider, so nothing to mix there.)
-        healthy = llm_pool.order("providers:text", healthy, lambda p: "-")
-    return healthy + parked        # a fully parked provider is still tried, last
+    return healthy + parked
 
 
 def active_label() -> str:
@@ -207,7 +243,7 @@ def active_label() -> str:
 
 def complete(system: str, user: str, max_tokens: int = 1500, *,
              media: list | None = None, provider: str | None = None,
-             retries: int = 2) -> tuple[str, str, str]:
+             retries: int = 2, stage: str | None = None) -> tuple[str, str, str]:
     """Returns (raw_text, provider, model).
 
     `provider=None` (the default) means "get me an answer": every provider in
@@ -217,12 +253,12 @@ def complete(system: str, user: str, max_tokens: int = 1500, *,
     last error raised. An explicit `provider` is used as-is (callers such as
     the extraction pipeline run their own chain loop and must not double up)."""
     if provider is not None:
-        return _complete_one(system, user, max_tokens, media, provider, retries)
-    chain = provider_chain(media=bool(media))
+        return _complete_one(system, user, max_tokens, media, provider, retries, stage)
+    chain = provider_chain(media=bool(media), stage=stage)
     last = None
     for prov in chain:
         try:
-            return _complete_one(system, user, max_tokens, media, prov, retries)
+            return _complete_one(system, user, max_tokens, media, prov, retries, stage)
         except Exception as e:  # noqa: BLE001 -- any provider failure -> next provider
             last = e
             print(f"[llm] {prov} failed ({type(e).__name__}: {str(e)[:100]}) -- "
@@ -231,14 +267,15 @@ def complete(system: str, user: str, max_tokens: int = 1500, *,
     raise last if last is not None else LLMUnavailable("no LLM provider is configured")
 
 
-def _complete_one(system, user, max_tokens, media, provider, retries):
+def _complete_one(system, user, max_tokens, media, provider, retries, stage=None):
     if not _key(provider):
         raise LLMUnavailable(f"No key for provider {provider!r}")
     model = _model(provider)
 
     if provider == "gemini":
         parts = [user] + (media or [])
-        return _gemini(system, parts, model, _key(provider), max_tokens), provider, model
+        return _gemini(system, parts, model, _key(provider), max_tokens,
+                       models=gemini_model_order(stage, bool(media))), provider, model
 
     if provider == "anthropic":
         return _anthropic(system, user, media, model, _key(provider), max_tokens), \
@@ -357,7 +394,7 @@ def gemini_keys(primary: str | None = None) -> list:
     return api_keys("GOOGLE_API_KEY", primary)
 
 
-def _gemini(system, parts, model, key, max_tokens, retries=1):
+def _gemini(system, parts, model, key, max_tokens, retries=1, models=None):
     from google import genai
     from google.genai import types
     from google.genai.errors import ServerError
@@ -392,12 +429,12 @@ def _gemini(system, parts, model, key, max_tokens, retries=1):
     # 2026-10-07: gemini-flash-latest 504'd after 60s while flash-lite
     # answered in 1s -- each screenshot cost ~50s). Keys are only ever
     # identified by their last 6 chars here, never logged in full.
-    # Primary model on every key first (quality), then the weaker fallback model
-    # on every key; healthy slots before parked ones (parked = last resort).
+    # The stage's best model on every key first, then its next model on every key; healthy slots before parked ones (parked = last resort).
     # Keys rotate round-robin per call so the daily quota is shared. Each
     # (key, model) is its own slot -- a model's quota is per model.
     keys = llm_pool.order("keys:gemini", gemini_keys(key), lambda k: llm_pool.slot_id("gemini", k))
-    slots = [(k, model) for k in keys] + [(k, _GEMINI_FALLBACK) for k in keys]
+    model_order = list(models) if models else [model, _GEMINI_FALLBACK]
+    slots = [(k, m) for m in model_order for k in keys]
     slots.sort(key=lambda sm: llm_pool.is_parked(llm_pool.slot_id("gemini", sm[0], sm[1])))   # stable
     started, last = time.time(), None
     for k, mdl in slots:

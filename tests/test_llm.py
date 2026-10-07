@@ -207,10 +207,10 @@ def test_a_healthy_primary_is_used_and_never_tripped(monkeypatch):
 
 def test_complete_falls_back_from_groq_to_gemini_when_groq_fails(monkeypatch):
     from yta import llm
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
     seen = []
 
-    def one(system, user, max_tokens, media, provider, retries):
+    def one(system, user, max_tokens, media, provider, retries, stage=None):
         seen.append(provider)
         if provider == "groq":
             raise llm.GenerationFailed("Failed to validate JSON")
@@ -222,9 +222,9 @@ def test_complete_falls_back_from_groq_to_gemini_when_groq_fails(monkeypatch):
 def test_complete_raises_the_last_error_only_when_every_provider_failed(monkeypatch):
     import pytest
     from yta import llm
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["groq", "gemini"])
 
-    def one(system, user, max_tokens, media, provider, retries):
+    def one(system, user, max_tokens, media, provider, retries, stage=None):
         raise RuntimeError(f"{provider} down")
     monkeypatch.setattr(llm, "_complete_one", one)
     with pytest.raises(RuntimeError, match="gemini down"):
@@ -236,7 +236,7 @@ def test_an_explicit_provider_is_not_failed_over(monkeypatch):
     from yta import llm
     seen = []
 
-    def one(system, user, max_tokens, media, provider, retries):
+    def one(system, user, max_tokens, media, provider, retries, stage=None):
         seen.append(provider)
         raise RuntimeError("boom")
     monkeypatch.setattr(llm, "_complete_one", one)
@@ -247,9 +247,9 @@ def test_an_explicit_provider_is_not_failed_over(monkeypatch):
 
 def test_vision_requests_only_chain_through_vision_capable_providers(monkeypatch):
     from yta import llm
-    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["gemini"] if media else ["groq", "gemini"])
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False, stage=None: ["gemini"] if media else ["groq", "gemini"])
     seen = []
-    monkeypatch.setattr(llm, "_complete_one", lambda s, u, mt, media, prov, r: seen.append(prov) or ("{}", prov, "m"))
+    monkeypatch.setattr(llm, "_complete_one", lambda s, u, mt, media, prov, r, st=None: seen.append(prov) or ("{}", prov, "m"))
     llm.complete("s", "u", media=[("image/png", b"x")])
     assert seen == ["gemini"]
 
@@ -448,11 +448,11 @@ def _two_providers(monkeypatch):
     return llm
 
 
-def test_text_requests_alternate_between_groq_and_gemini_when_both_are_healthy(monkeypatch):
+def test_text_always_goes_to_groq_first_and_gemini_is_only_the_fallback(monkeypatch):
+    # Owner: each provider where it is best, so behaviour stays consistent -- no
+    # alternating between two models that answer slightly differently.
     llm = _two_providers(monkeypatch)
-    firsts = [llm.provider_chain(False)[0] for _ in range(4)]
-    assert firsts == ["groq", "gemini", "groq", "gemini"]
-    assert all(sorted(llm.provider_chain(False)) == ["gemini", "groq"] for _ in range(3))   # each is the other's fallback
+    assert [llm.provider_chain(False) for _ in range(5)] == [["groq", "gemini"]] * 5
 
 
 def test_a_fully_parked_provider_moves_to_the_end_of_the_chain(monkeypatch):
@@ -472,7 +472,7 @@ def test_a_provider_with_one_healthy_key_left_is_still_healthy(monkeypatch):
     assert llm.provider_healthy("groq") is False
 
 
-def test_a_pinned_provider_is_never_rotated_away(monkeypatch):
+def test_a_pinned_provider_stays_first(monkeypatch):
     llm = _two_providers(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     assert [llm.provider_chain(False)[0] for _ in range(4)] == ["gemini"] * 4
@@ -491,3 +491,72 @@ def test_when_everything_is_parked_the_parked_slots_are_still_tried(monkeypatch)
     calls = _fake_genai(monkeypatch, lambda key, model: '{"ok": true}')
     assert llm._gemini("s", ["u"], "gemini-flash-latest", "k1", 50) == '{"ok": true}'
     assert calls == [("k1", "gemini-flash-latest")]          # a wrongly parked key can't take the bot offline
+
+
+# ==========================================================================
+# Per-stage defaults (owner 2026-10-07): each LLM call site uses the provider/model
+# best suited to it; keys rotate inside a provider; the OTHER provider is only the
+# fallback of last resort.
+# ==========================================================================
+
+def test_vision_stage_defaults_to_gemini_and_never_offers_groq(monkeypatch):
+    llm = _two_providers(monkeypatch)
+    assert llm.provider_chain(True) == ["gemini"]
+    assert llm.provider_chain(True, stage="vision") == ["gemini"]
+
+
+def test_text_stages_default_to_groq_with_gemini_as_the_fallback(monkeypatch):
+    llm = _two_providers(monkeypatch)
+    for stage in ("text_extract", "clarify", "room_judge"):
+        assert llm.provider_chain(False, stage=stage) == ["groq", "gemini"], stage
+
+
+def test_gemini_model_order_is_chosen_per_stage(monkeypatch):
+    from yta import llm
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    flash, lite = llm._model("gemini"), llm._GEMINI_FALLBACK
+    assert llm.gemini_model_order("vision", True) == [flash, lite]          # accuracy on screenshots first
+    assert llm.gemini_model_order("text_extract") == [lite, flash]          # fast model for text
+    assert llm.gemini_model_order("clarify") == [lite, flash]
+    assert llm.gemini_model_order("room_judge") == [flash, lite]            # careful judge first
+
+
+def test_the_stage_decides_which_gemini_model_is_tried_first(monkeypatch):
+    from yta import llm
+    _clean_env(monkeypatch, GOOGLE_API_KEY="k1")
+    calls = _fake_genai(monkeypatch, lambda key, model: '{"ok": true}')
+    llm._gemini("s", ["u"], llm._model("gemini"), "k1", 50, models=llm.gemini_model_order("text_extract"))
+    llm._gemini("s", ["u"], llm._model("gemini"), "k1", 50, models=llm.gemini_model_order("vision", True))
+    assert [m for _, m in calls] == [llm._GEMINI_FALLBACK, llm._model("gemini")]
+
+
+def test_the_other_provider_is_used_only_after_every_key_of_the_default_one_failed(monkeypatch):
+    from yta import llm
+    llm = _two_providers(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY_2", "g2")
+    seen = []
+
+    def one(system, user, max_tokens, media, provider, retries, stage=None):
+        seen.append(provider)
+        return ('{"ok": true}', provider, "m")
+    monkeypatch.setattr(llm, "_complete_one", one)
+    llm.complete("s", "u", stage="text_extract")
+    assert seen == ["groq"]                          # healthy default -> the fallback is never touched
+
+
+def test_gemini_is_the_fallback_for_text_only_when_groq_is_unavailable(monkeypatch):
+    from yta import llm_pool
+    llm = _two_providers(monkeypatch)
+    llm_pool.park(llm_pool.slot_id("groq", "g1"), 3600, "test")        # its only key is parked
+    assert llm.provider_chain(False, stage="text_extract") == ["gemini", "groq"]
+    seen = []
+
+    def one(system, user, max_tokens, media, provider, retries, stage=None):
+        seen.append(provider)
+        raise RuntimeError("down")
+    monkeypatch.setattr(llm, "_complete_one", one)
+    try:
+        llm.complete("s", "u", stage="text_extract")
+    except RuntimeError:
+        pass
+    assert seen == ["gemini", "groq"]                # and Groq is still tried LAST if Gemini failed too

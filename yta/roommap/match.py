@@ -207,7 +207,7 @@ def _llm_tiebreak(offer, buckets) -> "RoomBucket | None":
             'Return {"pick": <index>} for the one that is the same room, '
             'or {"pick": null} if none clearly is.')
     try:
-        txt, *_ = llm.complete(system, user, max_tokens=120)
+        txt, *_ = llm.complete(system, user, max_tokens=120, stage="room_judge")
         i = _json_obj(txt).get("pick")
         if isinstance(i, int) and 0 <= i < len(buckets):
             return buckets[i]
@@ -224,7 +224,7 @@ def _llm_confirm(offer, bucket) -> bool:
             f"Supplier room: {bucket.canonical!r}.\n"
             'Return {"same": true} or {"same": false}.')
     try:
-        txt, *_ = llm.complete(system, user, max_tokens=60)
+        txt, *_ = llm.complete(system, user, max_tokens=60, stage="room_judge")
         return bool(_json_obj(txt).get("same"))
     except Exception:
         return False
