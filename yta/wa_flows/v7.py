@@ -434,7 +434,7 @@ def _effective_missing(packet, missing: list, intent: str | None) -> list:
         if not packet.requested_offer.room_name \
                 and "requested_offer.room_name" not in missing:
             missing = missing + ["requested_offer.room_name"]
-    if not packet.requested_offer.room_name:
+    if not packet.requested_offer.room_name or getattr(packet, "_skip_price", False):
         missing = [m for m in missing if m != "ota_benchmark.final_payable"]
     return missing
 
@@ -600,7 +600,8 @@ def _send_deal_result(frm: str, packet, resolution: dict | None) -> None:
     once a customer picks from the option list), so both end up in the
     exact same confirm/decline + lead-recording flow."""
     text, matched, bookable, savings_line, confirm_line = _deal_message(
-        packet, resolution, compare=(resolution or {}).get("compare_ok", True))
+        packet, resolution,
+        compare=(resolution or {}).get("compare_ok", True) and not getattr(packet, "_assumed_guests", False))
 
     if bookable:
         text = _with_percent_headline(text, savings_line)
@@ -609,6 +610,10 @@ def _send_deal_result(frm: str, packet, resolution: dict | None) -> None:
         # The comparison variant has no "Pocket Stays price" line -- label its
         # bare money-bag header the same way so the guest always knows the
         # figure is the TOTAL for the whole stay, not per night.
+        note = _assumption_line(packet)
+        if note:
+            ask = "Shall I go ahead and secure this for you?"
+            text = text.replace(ask, f"{note}\n\n{ask}", 1) if ask in text else f"{text}\n\n{note}"
         if "Pocket Stays price" not in text:
             text = text.replace("\n💰\n", f"\n💰 Total for {_nights_label(packet)}\n", 1)
         with _WA_SESSIONS_LOCK:
@@ -801,6 +806,9 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
         lines.append(f"💰 We have rooms starting from {ccy} {price:,.2f} total for "
                      f"{_nights_label(packet)} — *{cheapest_name}*")
         lines.append("")
+    note = _assumption_line(packet)
+    if note:
+        lines += [note, ""]
     lines.append("Tap to explore more rooms")
 
     sections = room_list_sections(groups, clean_name=_clean_room_name)
@@ -925,7 +933,7 @@ _SLOW_NOTICE_SEC = 12
 _LLM_TROUBLE_TEXT = ("I'm having trouble reading that right now — it's on my side, not yours. "
                     "Tap *Try again* in a moment and I'll pick it up from here.")
 _ORPHAN_BUTTON_IDS = {"confirm_book", "decline_book", "explore_other_rooms",
-                      "show_list_again", "see_other_rooms", "year_0", "year_1", "hotel_yes", "hotel_no", "split_even"}
+                      "show_list_again", "see_other_rooms", "year_0", "year_1", "hotel_yes", "hotel_no", "show_anyway"}
 
 
 def _start_slow_notice(frm: str):
@@ -1001,9 +1009,8 @@ def _ask_year(frm: str, packet, md, intent) -> None:
                               "last_activity": time.time()}
     buttons = [(bid, f"{ci:%-d %b}–{co:%-d %b} {ci.year}") for bid, (ci, co) in opts.items()]
     buttons.append(("start_new_chat", "Start over"))
-    wa_send_buttons(
-        frm, f"I can see {shown} but not the year — which year is this stay for? "
-             f"(Tap one, or just type the year.)", buttons[:3])
+    wa_send_buttons(frm, f"📅 *Which year is {shown}?*\nTap one below, or just type the year.",
+                    buttons[:3])
 
 
 def _handle_awaiting_year(frm: str, session: dict, items: list, button_id) -> None:
@@ -1054,6 +1061,168 @@ def _nights_label(packet) -> str:
     return f"{n} night{'s' if n != 1 else ''}" if n else "your stay"
 
 
+# --------------------------------------------------------------------------
+# Guided asks (owner feedback 2026-10-07): when something is missing, the
+# QUESTION comes first (the old message buried it under a recap), and the
+# guest gets tappable sample answers plus an "Other -- type it" row instead of
+# only "Start over / Talk to a human", which read as a dead end. A tap is the
+# guest's own explicit choice, never an assumption. Typing always still works.
+# --------------------------------------------------------------------------
+_ASK_ORDER = ("hotel.name", "stay.check_in", "stay.check_out", "stay.rooms", "stay.occupancy",
+              "requested_offer.room_name", "ota_benchmark.final_payable")
+_ASK_KIND = {"hotel.name": "hotel", "stay.check_in": "dates", "stay.check_out": "dates",
+             "stay.rooms": "guests", "stay.occupancy": "guests",
+             "requested_offer.room_name": "room", "ota_benchmark.final_payable": "price"}
+_ASK_TEXT = {
+    "hotel": ("🏨 *Which hotel is this?*",
+              "Type the name as shown on the page, e.g. *Taj Santacruz, Mumbai* — or send a screenshot."),
+    "dates": ("📅 *What are your check-in and check-out dates?*",
+              "Just type them, e.g. *17 Dec – 18 Dec 2026* — or send a fuller screenshot."),
+    "guests": ("👥 *How many rooms, and how many guests in each?*",
+               "Just type it, e.g. *1 room: 2 adults* or *2 rooms: 2 adults + 3 adults* "
+               "(add the kids' ages, if any)."),
+    "room": ("🛏️ *Which room type is it?*",
+             "Type the room name as shown on the page, e.g. *Deluxe Room*."),
+    "price": ("💳 *What total price did you see?*",
+              "Type the total, e.g. *INR 25,000*."),
+}
+
+
+def _first_missing_kind(missing: list):
+    for f in _ASK_ORDER:
+        if f in missing:
+            return _ASK_KIND[f]
+    return None
+
+
+_SKIPPABLE_KINDS = ("guests", "room", "price")
+
+
+def _missing_kinds(missing: list) -> list:
+    out = []
+    for f in _ASK_ORDER:
+        k = _ASK_KIND[f]
+        if f in missing and k not in out:
+            out.append(k)
+    return out
+
+
+def _assumption_sentence(kinds: list) -> str:
+    """What "Show my rate anyway" will do, spelled out BEFORE the guest taps."""
+    parts = []
+    if "guests" in kinds:
+        parts.append("assume *1 room, 2 adults*")
+    if "room" in kinds:
+        parts.append("show *all available rooms*")
+    if "price" in kinds:
+        parts.append("show our rate *without comparing* it to your price")
+    if "guests" in kinds and "price" not in kinds:
+        parts.append("skip the price comparison, since the guests may differ")
+    return "I'll " + ", ".join(parts[:-1]) + (" and " if len(parts) > 1 else "") + parts[-1] if parts else ""
+
+
+def _can_show_anyway(missing: list, packet=None) -> bool:
+    kinds = _missing_kinds(missing)
+    if "guests" in kinds and packet is not None:
+        rooms = getattr(packet.stay, "rooms", None)
+        if isinstance(rooms, int) and rooms > 1:
+            return False      # they already said several rooms -- "1 room, 2 adults" would contradict them
+    return bool(kinds) and all(k in _SKIPPABLE_KINDS for k in kinds)
+
+
+def _ask_body(packet, kind: str, clarify: str | None, missing: list | None = None) -> str:
+    question, hint = _ASK_TEXT[kind]
+    rooms = getattr(packet.stay, "rooms", None)
+    if kind == "guests" and isinstance(rooms, int) and rooms > 1:
+        # The guest already said how many rooms ("2 room 5 log"), so the one
+        # thing missing is the DISTRIBUTION -- ask exactly that (the generic
+        # guests question, and the old preset buttons, didn't fit it).
+        adults = getattr(packet.stay, "adults", None)
+        kids = getattr(packet.stay, "children", None) or 0
+        who = ""
+        if adults:
+            who = f"{adults + kids} guests" if kids else f"{adults} adults"
+        question = f"👥 *How are the {who or 'guests'} distributed across the {rooms} rooms?*"
+        hint = ("Just type it, e.g. *Room 1: 2 adults, Room 2: 3 adults* "
+                "(add the kids' ages, if any).")
+    elif clarify:                                  # a specific LLM follow-up beats the generic line
+        question, hint = f"❓ *{clarify.strip().rstrip('?')}?*", _ASK_TEXT[kind][1]
+    recap = _recap_block(packet)
+    body = f"{question}\n{hint}"
+    if missing and _can_show_anyway(missing, packet):
+        body += f"\n\nOr tap *Show my rate anyway* — {_assumption_sentence(_missing_kinds(missing))}."
+    if recap:
+        body += f"\n\nSo far:\n{recap}"
+    return body[:1000]
+
+
+def _send_ask(frm: str, packet, missing: list, intent, clarify: str | None = None) -> None:
+    """The one place every "something is missing" question is sent from:
+    question FIRST, a typed example under it, the facts so far last. Buttons
+    are only ever the two escapes -- no sample answers (a button can carry a
+    wrong suggestion, e.g. "1 room" to a 2-room guest)."""
+    kind = _first_missing_kind(missing)
+    if kind is None:
+        wa_send_buttons(frm, clarify or "Could you tell me a bit more?",
+                        [("start_new_chat", "Start over"), ("human_help", "Talk to a human")])
+        return
+    buttons = [("start_new_chat", "Start over"), ("human_help", "Talk to a human")]
+    if _can_show_anyway(missing, packet):
+        buttons.insert(0, ("show_anyway", "Show my rate anyway"))
+    wa_send_buttons(frm, _ask_body(packet, kind, clarify, missing), buttons)
+
+
+def _handle_show_anyway(frm: str, session: dict) -> None:
+    """"Show my rate anyway": proceed without the skippable gaps. Every
+    assumption is recorded on the packet (evidence + _assumptions) and printed
+    in the rate message, and a rate built on assumed guests is never compared
+    with the guest's own price (not like-for-like)."""
+    from yta.schema import LLM
+    packet, intent = session["packet"], session.get("intent")
+    kinds = _missing_kinds(session.get("missing", []))
+    assumptions = []
+    if "guests" in kinds:
+        packet.add("stay.occupancy", [{"adults": 2, "children": 0, "child_ages": []}],
+                   LLM, 0.5, "ASSUMPTION: guest tapped Show my rate anyway without giving guests")
+        packet.add("stay.rooms", 1, LLM, 0.5, "ASSUMPTION: guest tapped Show my rate anyway")
+        packet.stay.occupancy_source, packet.stay.occupancy_confidence = "assumed_default", 0.5
+        packet._assumed_guests = True
+        assumptions.append("1 room, 2 adults")
+    if "room" in kinds:
+        intent = "search"
+    if "price" in kinds:
+        packet._skip_price = True
+    packet._assumptions = assumptions
+    packet._split_hint = None
+    print(f"[wa v7] {frm} tapped Show my rate anyway: kinds={kinds} assumptions={assumptions}", flush=True)
+    packet.derive_stay()
+    with _WA_SESSIONS_LOCK:
+        _WA_SESSIONS.pop(frm, None)
+    _continue_with_packet(frm, packet, None, intent)
+
+
+def _assumption_line(packet) -> str:
+    a = getattr(packet, "_assumptions", None)
+    return (f"ℹ️ *Assumed:* {', '.join(a)}. Different guests? Send *start over* and give me "
+            f"the exact guests.") if a else ""
+
+
+def _pull_month_day_dates(fields: dict):
+    """The clarification extractor returns a year-less date as MM-DD (policy:
+    never guess a year). Splits those out so the guest is asked the year with
+    buttons instead of getting a text question with nothing to tap."""
+    ym = {}
+    for key, name in (("stay.check_in", "check_in"), ("stay.check_out", "check_out")):
+        v = fields.get(key)
+        m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", v.strip()) if isinstance(v, str) else None
+        if m:
+            ym[name] = (int(m.group(1)), int(m.group(2)))
+    if len(ym) == 2:
+        fields = {k: v for k, v in fields.items() if k not in ("stay.check_in", "stay.check_out")}
+        return fields, ym
+    return fields, {}
+
+
 def _ask_message_with_example(packet, missing: list, clarify: str | None = None) -> str:
     """Wraps wa_shared.found_and_ask_message() to also show a concrete
     example for the single most relevant missing field on the FIRST ask
@@ -1072,16 +1241,9 @@ def _ask_message_with_example(packet, missing: list, clarify: str | None = None)
 
 
 def _ask_missing_buttons(missing: list) -> list:
-    """Button set for a missing-field ask. Finding 11: when occupancy is
-    the ONE thing being asked about, offer the two most common real
-    shapes as taps (free text still answers anything unusual, unchanged).
-    Finding 4/9: otherwise, offer the human-help escape wherever
-    WhatsApp's 3-button cap leaves room -- a multi-field ask has no room
-    for both occupancy presets AND human-help at once, so occupancy takes
-    priority when it applies (the global "talk to a human" TEXT phrase
-    still works everywhere regardless of which buttons are on screen)."""
-    if missing == ["stay.occupancy"] or missing == ["stay.rooms"]:
-        return list(_OCCUPANCY_QUICK_REPLIES) + [("start_new_chat", "Start over")]
+    """Only the two escapes. The old occupancy quick-reply presets are gone:
+    "2 adults, 1 room" offered to a guest who had just said "2 rooms" is a
+    wrong suggestion, and a tap can't be taken back."""
     return [("start_new_chat", "Start over"), ("human_help", "Talk to a human")]
 
 
@@ -1169,33 +1331,12 @@ def _ask_room_split(frm: str, packet, intent, hint: dict) -> None:
         _WA_SESSIONS[frm] = {"state": "awaiting_field", "packet": packet, "missing": ["stay.occupancy"],
                               "intent": intent, "clarify_text": seed, "split_hint": hint,
                               "unproductive_attempts": 0, "last_activity": time.time()}
-    buttons = []
-    if not c and n > 1 and a % n == 0:
-        buttons.append(("split_even", f"{a // n} adults in each"))
-    buttons.append(("start_new_chat", "Start over"))
-    if len(buttons) < 3:
-        buttons.append(("human_help", "Talk to a human"))
     wa_send_buttons(
         frm,
-        f"{_recap_block(packet)}\n\nYou mentioned {who} in {n} rooms — how are the guests "
-        f"split across the rooms? For example, \"2 adults in each room\", or \"3 adults in "
-        f"room 1 and 1 adult in room 2\".",
-        buttons[:3])
-
-
-def _apply_even_split(frm: str, session: dict) -> None:
-    """The guest tapped the explicit even-split option."""
-    from yta.schema import LLM
-    packet, hint = session["packet"], session["split_hint"]
-    n, per = hint["rooms"], hint["adults"] // hint["rooms"]
-    packet.add("stay.occupancy", [{"adults": per, "children": 0, "child_ages": []} for _ in range(n)],
-               LLM, 1.0, "guest tapped the even split")
-    packet.stay.occupancy_source, packet.stay.occupancy_confidence = "guest_confirmed", 1.0
-    packet.derive_stay()
-    packet._split_hint = None
-    with _WA_SESSIONS_LOCK:
-        _WA_SESSIONS.pop(frm, None)
-    _continue_with_packet(frm, packet, None, session.get("intent"))
+        f"👥 *How are the {who} split across the {n} rooms?*\n"
+        f"For example, \"2 adults in each room\", or \"3 adults in room 1 and 1 adult in room 2\".\n\n"
+        f"So far:\n{_recap_block(packet)}",
+        [("start_new_chat", "Start over"), ("human_help", "Talk to a human")])
 
 
 def _continue_with_packet(frm: str, packet, url, intent) -> None:
@@ -1229,8 +1370,7 @@ def _continue_with_packet(frm: str, packet, url, intent) -> None:
             if hint and missing == ["stay.occupancy"]:
                 _ask_room_split(frm, packet, intent, hint)
                 return
-            wa_send_buttons(frm, _ask_message_with_example(packet, missing),
-                                   _ask_missing_buttons(missing))
+            _send_ask(frm, packet, missing, intent)
         return
     # Everything needed came in on the first submission -- still show what
     # was actually read before quoting a price, same as the ask-for-more
@@ -1271,7 +1411,13 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
 
     accumulated = "\n".join(t for t in (session.get("clarify_text"), text) if t)
 
-    fields, clarify, llm_ok = extract_clarification_ex(session["missing"], accumulated, media=media)
+    # Occupancy answers usually carry the room count too ("2 room 5 log"), so let
+    # the extractor fill stay.rooms alongside stay.occupancy.
+    wanted = list(session["missing"])
+    if "stay.occupancy" in wanted and "stay.rooms" not in wanted:
+        wanted.append("stay.rooms")
+    fields, clarify, llm_ok = extract_clarification_ex(wanted, accumulated, media=media)
+    fields, year_md = _pull_month_day_dates(fields)
     print(f"[wa v7] clarification filled: {list(fields.keys())}; note={clarify!r}; llm_ok={llm_ok}",
           flush=True)
     if not llm_ok:
@@ -1284,7 +1430,7 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
                         [("try_again", "Try again"), ("start_new_chat", "Start over")])
         return
 
-    if not fields and not clarify:
+    if not fields and not clarify and not year_md:
         # Guard A (item 16): nothing about the CURRENT question was
         # answered, but the reply reads like a full query on its own --
         # more likely a pivot to a different hotel that a customer typed
@@ -1307,14 +1453,11 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
             # Strike 1 (item 17): re-ask with a concrete example instead
             # of the bare question -- still open, no alternative-input
             # offer yet.
-            question = _closing_question(session["missing"])
-            if example:
-                question = f"{question} For example, {example}."
             with _WA_SESSIONS_LOCK:
                 session["last_activity"] = time.time()
                 session["unproductive_attempts"] = attempts
                 _WA_SESSIONS[frm] = session
-            wa_send_buttons(frm, question, _ask_missing_buttons(session["missing"]))
+            _send_ask(frm, session["packet"], session["missing"], session.get("intent"))
             return
         if attempts == 2:
             # Strike 2 (item 17): NOT a wipe -- offer alternative ways to
@@ -1343,6 +1486,14 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
     for path, val in fields.items():
         packet.add(path, val, LLM, 0.7, "whatsapp clarification")
     packet.derive_stay()
+    if year_md:
+        # "22 dec se 24 dec": the day/month are known, the YEAR is not -- ask it
+        # with tappable full dates (the rest is asked after the guest picks).
+        packet._year_missing = {"check_in": year_md["check_in"], "check_out": year_md["check_out"]}
+        md = _year_missing_md(packet)
+        if md and len(_year_candidates(md)) == 2:
+            _ask_year(frm, packet, md, intent)
+            return
     still_missing = _effective_missing(packet, packet.check_mandatory(), intent)
     print(f"[wa v7] still missing after clarification: {still_missing}", flush=True)
     if still_missing:
@@ -1350,8 +1501,7 @@ def _handle_awaiting_field(frm: str, session: dict, items: list) -> None:
             _WA_SESSIONS[frm] = {"state": "awaiting_field", "packet": packet, "missing": still_missing,
                                   "intent": intent, "clarify_text": accumulated,
                                   "unproductive_attempts": 0, "last_activity": time.time()}
-        wa_send_buttons(frm, _ask_message_with_example(packet, still_missing, clarify),
-                               _ask_missing_buttons(still_missing))
+        _send_ask(frm, packet, still_missing, intent, clarify)
         return
 
     with _WA_SESSIONS_LOCK:
@@ -1624,9 +1774,9 @@ def _run_batch_once(frm: str, items: list, session, *, allow_retry: bool) -> Non
                 _send_onboarding_choice(frm)
             return
 
-        if (button_id == "split_even" and session is not None
-                and session.get("state") == "awaiting_field" and session.get("split_hint")):
-            _apply_even_split(frm, session)
+        if (button_id == "show_anyway" and session is not None
+                and session.get("state") == "awaiting_field"):
+            _handle_show_anyway(frm, session)
             return
 
         if button_id in ("await_type_details", "await_send_screenshot"):

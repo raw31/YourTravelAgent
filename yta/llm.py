@@ -51,6 +51,9 @@ _KEY_ENV = {
 _TEXT_PRIORITY = ["groq", "grok", "openai", "gemini", "anthropic"]
 _VISION_PRIORITY = ["gemini", "anthropic"]
 _GEMINI_FALLBACK = "gemini-flash-lite-latest"
+_GEMINI_SKIP_UNTIL: dict = {}      # (key-suffix, model) -> epoch seconds until which the slot is skipped
+_GEMINI_BREAKER_SEC = 300
+_GEMINI_TOTAL_BUDGET_SEC = 50      # stop trying further slots once a call has taken this long
 
 
 class LLMUnavailable(RuntimeError):
@@ -209,22 +212,32 @@ def _anthropic(system, user, media, model, key, max_tokens):
     return r.content[0].text
 
 
+def gemini_keys(primary: str | None = None) -> list:
+    """Every configured Gemini key, primary first, de-duplicated:
+    GOOGLE_API_KEY, then GOOGLE_API_KEYS (comma-separated), then
+    GOOGLE_API_KEY_2 .. GOOGLE_API_KEY_9. A key hitting its free-tier quota
+    (429) or hanging must not take every screenshot down with it -- vision is
+    Gemini-only, so these fallbacks are the only safety net for images."""
+    keys: list = []
+
+    def add(k):
+        k = (k or "").strip()
+        if k and k not in keys:
+            keys.append(k)
+    add(primary)
+    add(os.environ.get("GOOGLE_API_KEY"))
+    for k in (os.environ.get("GOOGLE_API_KEYS") or "").split(","):
+        add(k)
+    for n in range(2, 10):
+        add(os.environ.get(f"GOOGLE_API_KEY_{n}"))
+    return keys
+
+
 def _gemini(system, parts, model, key, max_tokens, retries=1):
     from google import genai
     from google.genai import types
     from google.genai.errors import ServerError
 
-    client = genai.Client(api_key=key,
-                          http_options=types.HttpOptions(
-                              timeout=45_000,             # ms
-                              # The SDK's own default retry policy retries a
-                              # 429 (rate limit / daily quota exhausted) up
-                              # to 5x with exponential backoff — 1+2+4+8+16s
-                              # ~= 30s of pure waiting on a call that cannot
-                              # possibly succeed until the quota resets.
-                              # attempts=1 disables that; our own loop below
-                              # still retries ServerError (5xx) deliberately.
-                              retry_options=types.HttpRetryOptions(attempts=1)))
     contents = []
     for part in parts:
         if isinstance(part, tuple):
@@ -239,18 +252,44 @@ def _gemini(system, parts, model, key, max_tokens, retries=1):
     except Exception:
         pass
 
-    last = None
-    for mdl in (model, _GEMINI_FALLBACK):
+    def _client(k):
+        return genai.Client(api_key=k, http_options=types.HttpOptions(
+            timeout=25_000,             # ms (a healthy call is 2-10s)
+            # The SDK's own default retry policy retries a 429 (rate limit /
+            # daily quota exhausted) up to 5x with exponential backoff -- ~30s
+            # of pure waiting on a call that cannot succeed until the quota
+            # resets. attempts=1 disables that; the loop below fails over.
+            retry_options=types.HttpRetryOptions(attempts=1)))
+
+    # Order: the PRIMARY model on every key first (quality), only then the
+    # weaker fallback model on every key. Each (key, model) slot has its own
+    # circuit breaker, so a quota-dead or hanging slot is skipped for a few
+    # minutes instead of making every guest wait out its timeout (live
+    # 2026-10-07: gemini-flash-latest 504'd after 60s while flash-lite
+    # answered in 1s -- each screenshot cost ~50s). Keys are only ever
+    # identified by their last 6 chars here, never logged in full.
+    keys = gemini_keys(key)
+    slots = [(k, model) for k in keys] + [(k, _GEMINI_FALLBACK) for k in keys]
+    started, last = time.time(), None
+    for k, mdl in slots:
+        slot = (k[-6:], mdl)
+        if time.time() < _GEMINI_SKIP_UNTIL.get(slot, 0):
+            continue
+        if last is not None and time.time() - started > _GEMINI_TOTAL_BUDGET_SEC:
+            break                              # a guest has waited long enough; report the failure
         for attempt in range(retries):
             try:
-                return client.models.generate_content(
+                return _client(k).models.generate_content(
                     model=mdl, contents=contents, config=cfg).text
             except ServerError as e:
                 last = e
-                time.sleep(2 * (attempt + 1))
+                _GEMINI_SKIP_UNTIL[slot] = time.time() + _GEMINI_BREAKER_SEC
             except Exception as e:
                 last = e
+                _GEMINI_SKIP_UNTIL[slot] = time.time() + _GEMINI_BREAKER_SEC
                 break
+    if last is None:
+        last = RuntimeError("every Gemini key/model is cooling down after recent failures")
     raise last
 
 

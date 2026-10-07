@@ -92,6 +92,14 @@ class Run:
                 if junk in f" {blob} " and not (junk == "nan" and "nan" not in blob.split()):
                     if junk in (" none ",) or junk in ("{", "}", "[object"):
                         self.check(False, f"junk token {junk!r} in message: {m.text[:80]!r}")
+            if "So far:" in m.text:                       # an ask: the QUESTION must lead
+                first = m.text.splitlines()[0]
+                self.check("?" in first or first.startswith(("📅", "👥", "🏨", "🛏️", "💳")),
+                           f"ask does not lead with its question: {first[:70]!r}")
+                self.check(not m.text.startswith(("Here's what I have", "Got it all", "Just about set",
+                                                  "Almost there")), "ask opens with a recap, not the question")
+            for bid in m.ids():
+                self.check(not bid.startswith(("occ_", "date_")), f"sample-value button/row offered: {bid}")
             if GENERIC_ERR in blob and not expect_error:
                 self.check(False, "bot hit its generic 'something went wrong' error")
         if new and not allow_text_end:
@@ -116,6 +124,10 @@ class Run:
     # -- helpers
     def texts(self, new=None):
         return [m.text for m in (new if new is not None else self.w.msgs(self.frm))]
+
+    def ids_of(self, new):
+        m = next((x for x in reversed(new) if x.kind in ("buttons", "list")), None)
+        return m.ids() if m else []
 
     def has(self, new, *subs):
         blob = "\n".join(self.texts(new)).lower()
@@ -325,7 +337,8 @@ def _split_ask(r: Run, occ="4 adults, 2 rooms", price="INR 62,000"):
     new = r.do("say", full_deal_text(occ=occ, price=price))
     r.check(len(r.w.tj_calls) == 0, "priced an assumed even split of the guests")
     r.check(r.state() == "awaiting_field", f"state {r.state()!r}")
-    r.check(r.has(new, "you mentioned", "rooms"), "did not quote back what the guest stated")
+    r.check(r.has(new, "split across the 2 rooms"), "did not ask how the guests are split")
+    r.check(r.ids_of(new) == ["start_new_chat", "human_help"], f"unexpected buttons {r.ids_of(new)}")
     return new
 
 
@@ -345,17 +358,6 @@ def s10(r: Run):
     r.check(r.has(new, "2 rooms · 2 adults each"), "multi-room occupancy not described clearly")
 
 
-@scenario("S10b", "same, but the guest TAPS the explicit even-split button")
-def s10b(r: Run):
-    _split_ask(r)
-    r.check("split_even" in r.last_ids(), f"no even-split option offered: {r.last_ids()}")
-    r.do("tap", "split_even")
-    r.check(len(r.w.tj_calls) == 1, f"no pricing after the tap ({len(r.w.tj_calls)})")
-    if r.w.tj_calls:
-        rooms = r.w.tj_calls[0].get("rooms") or []
-        r.check([x.get("adults") for x in rooms] == [2, 2], f"rooms sent to TripJack: {rooms}")
-
-
 @scenario("S10c", "uneven split typed (3 adults + 1 adult)")
 def s10c(r: Run):
     _split_ask(r)
@@ -364,12 +366,6 @@ def s10c(r: Run):
     if r.w.tj_calls:
         rooms = r.w.tj_calls[0].get("rooms") or []
         r.check(sorted(x.get("adults") for x in rooms) == [1, 3], f"rooms sent to TripJack: {rooms}")
-
-
-@scenario("S10d", "children in the aggregate: no even-split shortcut offered")
-def s10d(r: Run):
-    _split_ask(r, occ="4 adults and 2 children, 2 rooms")
-    r.check("split_even" not in r.last_ids(), "offered an even split despite children")
 
 
 @scenario("S11", "'Explore other rooms': the guest's OWN room is compared, any other room is a plain rate")
@@ -541,6 +537,77 @@ def s25(r: Run):
                       f"Luxury Room City View Twin Bed, Room only, 31000 rupees")
     r.check(len(r.w.tj_calls) >= 1 or r.state() in ("awaiting_field", "awaiting_year"),
             "informal message produced no progress")
+
+
+@scenario("S26", "dates missing: question first, no 'show anyway'; typed year-less dates -> year buttons")
+def s26(r: Run):
+    open_deal(r)
+    new = r.do("say", f"{TAJ}, 2 adults 1 room, Luxury Room City View King Bed, total {DEAL_PRICE}")
+    r.check(r.state() == "awaiting_field", f"state {r.state()!r}")
+    r.check(new[-1].text.startswith("📅 *What are your check-in and check-out dates?*"),
+            f"question not first: {new[-1].text[:60]!r}")
+    r.check("show_anyway" not in r.last_ids(), "offered 'show anyway' with no dates at all")
+    new = r.do("say", "22 dec se 24 dec")
+    r.check(new[-1].text.startswith("📅 *Which year is 22 Dec – 24 Dec?*"), f"no year question: {new[-1].text[:70]!r}")
+    r.check({"year_0", "year_1"} <= set(r.last_ids()), f"year buttons missing: {r.last_ids()}")
+    r.check(len(r.w.tj_calls) == 0, "searched before the year was known")
+    r.do("tap", "year_0")
+    r.check(r.tj_checkin() and r.tj_checkin()[0].endswith("-12-22"), f"TripJack dates {r.tj_checkin()}")
+
+
+@scenario("S27", "guests missing -> '2 room 5 log' -> asks the DISTRIBUTION -> '2 in one, 3 in the other'")
+def s27(r: Run):
+    open_deal(r)
+    new = r.do("say", f"{TAJ}, 17 Dec {FUT} to 18 Dec {FUT}, Luxury Room City View King Bed, total INR 62,000")
+    r.check(r.state() == "awaiting_field", f"state {r.state()!r}")
+    r.check(new[-1].text.startswith("👥 *How many rooms, and how many guests in each?*"), f"question not first: {new[-1].text[:70]!r}")
+    r.check("show_anyway" in r.last_ids(), "no 'Show my rate anyway' for missing guests")
+    r.check("assume *1 room, 2 adults*" in new[-1].text, "the assumption is not stated before the tap")
+    new = r.do("say", "2 room 5 log")
+    r.check("distributed across the 2 rooms" in new[-1].text, f"not a distribution question: {new[-1].text[:90]!r}")
+    r.check("Room 1: 2 adults, Room 2: 3 adults" in new[-1].text, "no distribution example")
+    r.check(r.state() == "awaiting_field", f"state {r.state()!r}")
+    r.do("say", "Ek kamre me do log, dusre kamre me 3 log")
+    r.check(len(r.w.tj_calls) == 1, f"no pricing after the distribution ({len(r.w.tj_calls)})")
+    if r.w.tj_calls:
+        rooms = r.w.tj_calls[0].get("rooms") or []
+        r.check(sorted(x.get("adults") for x in rooms) == [2, 3], f"TripJack rooms: {rooms}")
+
+
+@scenario("S28", "'Show my rate anyway' on missing guests: assumption stated, rate shown, NO comparison")
+def s28(r: Run):
+    open_deal(r)
+    r.do("say", f"{TAJ}, 17 Dec {FUT} to 18 Dec {FUT}, Luxury Room City View King Bed, total INR 62,000")
+    new = r.do("tap", "show_anyway")
+    r.check(len(r.w.tj_calls) == 1, "no pricing after Show my rate anyway")
+    if r.w.tj_calls:
+        rooms = r.w.tj_calls[0].get("rooms") or []
+        r.check([x.get("adults") for x in rooms] == [2], f"assumed guests sent to TripJack: {rooms}")
+    r.check(r.has(new, "assumed:", "1 room, 2 adults"), "the assumption is not printed with the rate")
+    r.check(not r.has(new, "better rate") and not r.has(new, "you save") and not r.has(new, "couldn't beat"),
+            "compared a rate built on assumed guests with the guest's own price")
+    r.check(r.state() == "presented" and "confirm_book" in r.last_ids(), f"no bookable offer ({r.state()!r})")
+
+
+@scenario("S29", "'Show my rate anyway' on a missing price: our rate, explicitly without a comparison")
+def s29(r: Run):
+    open_deal(r)
+    new = r.do("say", f"{TAJ}, {FUT}-12-17 to {FUT}-12-18, 2 adults 1 room, Luxury Room City View King Bed")
+    r.check(new[-1].text.startswith("💳 *What total price did you see?*"), f"question not first: {new[-1].text[:60]!r}")
+    r.check("without comparing" in new[-1].text, "the 'no comparison' consequence is not stated up front")
+    new = r.do("tap", "show_anyway")
+    r.check(r.has(new, "pocket stays price"), "no plain rate after Show my rate anyway")
+    r.check(not r.has(new, "better rate") and not r.has(new, "you save"), "claimed a saving with no price to compare")
+
+
+@scenario("S30", "'Show my rate anyway' on a missing room name lists all the rooms")
+def s30(r: Run):
+    open_deal(r)
+    new = r.do("say", f"{TAJ}, {FUT}-12-17 to {FUT}-12-18, 2 adults 1 room, total {DEAL_PRICE}")
+    r.check(new[-1].text.startswith("🛏️ *Which room type is it?*"), f"question not first: {new[-1].text[:60]!r}")
+    r.check("show_anyway" in r.last_ids(), "no 'Show my rate anyway' for a missing room name")
+    new = r.do("tap", "show_anyway")
+    r.check(any(m.kind == "list" for m in new), "did not list the rooms")
 
 
 # ---------------------------------------------------------------- explorer

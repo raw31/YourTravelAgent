@@ -383,14 +383,20 @@ def test_help_phrase_does_not_fire_on_a_long_real_query(sent, monkeypatch):
 
 # -- finding 11: occupancy quick-reply presets ------------------------------
 
-def test_occupancy_only_missing_offers_quick_reply_presets(sent, monkeypatch):
+def test_missing_occupancy_ask_puts_the_question_first_and_has_no_sample_buttons(sent, monkeypatch):
+    # Owner feedback 2026-10-07: the question was buried under a recap, and the
+    # preset buttons ("2 adults, 1 room") were wrong for a guest who had just
+    # said "2 rooms" -- a button can carry a wrong suggestion. Question first,
+    # typed example, only the two escapes as buttons.
     monkeypatch.setattr("yta.pipeline.extract",
                          lambda *a, **kw: _Packet(missing=["stay.occupancy"]))
     v7.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x is what I picked"}])
     kind, body, buttons = next(m for m in sent if m[0] == "buttons")
-    ids = [b for b, _ in buttons]
-    assert "occ_2a1r" in ids and "occ_2a_kids" in ids and "start_new_chat" in ids
-    assert "human_help" not in ids   # WhatsApp's 3-button cap -- presets take priority here
+    assert body.startswith("👥 *How many rooms, and how many guests in each?*")
+    assert "e.g." in body and body.index("e.g.") < body.index("So far:")
+    assert not any(b.startswith("occ_") for b, _ in buttons)               # no sample-value buttons
+    assert [b for b, _ in buttons] == ["show_anyway", "start_new_chat", "human_help"]
+    assert "assume *1 room, 2 adults*" in body                            # the assumption is stated up front
 
 
 def test_multi_field_missing_offers_human_help_not_occupancy_presets(sent, monkeypatch):
@@ -400,7 +406,8 @@ def test_multi_field_missing_offers_human_help_not_occupancy_presets(sent, monke
     v7.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x is what I picked"}])
     kind, body, buttons = next(m for m in sent if m[0] == "buttons")
     ids = [b for b, _ in buttons]
-    assert ids == ["start_new_chat", "human_help"]
+    assert ids == ["show_anyway", "start_new_chat", "human_help"]
+    assert "assume *1 room, 2 adults*" in body and "without comparing" in body
 
 
 def test_occupancy_preset_tap_feeds_extraction_as_plain_text(sent, monkeypatch):
@@ -425,8 +432,8 @@ def test_first_ask_for_a_missing_field_includes_an_example(sent, monkeypatch):
                          lambda *a, **kw: _Packet(missing=["requested_offer.room_name"]))
     v7.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x"}])
     body = next(m[1] for m in sent if m[0] == "buttons")
-    assert "for example" in body.lower()
-    assert "deluxe room" in body.lower()
+    assert body.startswith("🛏️ *Which room type is it?*")
+    assert "e.g." in body and "deluxe room" in body.lower()
 
 
 def test_clarify_question_is_never_followed_by_a_generic_example(sent, monkeypatch):
@@ -834,37 +841,116 @@ def _split_packet():
     return p
 
 
-def test_split_ask_quotes_the_guests_own_totals_and_offers_an_explicit_even_split(sent):
+def test_split_ask_leads_with_the_question_quotes_the_totals_and_suggests_no_split(sent):
     p = _split_packet()
     v7._continue_with_packet("cust", p, None, None)
     kind, body, buttons = sent[-1]
-    assert "4 adults" in body and "2 rooms" in body
-    assert [b for b, _ in buttons][0] == "split_even" and buttons[0][1] == "2 adults in each"
+    assert body.startswith("👥 *How are the 4 adults split across the 2 rooms?*")
+    assert body.index("split across") < body.index("So far:")
+    assert [b for b, _ in buttons] == ["start_new_chat", "human_help"]      # no "2 adults in each"
     s = v7._WA_SESSIONS["cust"]
     assert s["state"] == "awaiting_field" and "2 rooms" in s["clarify_text"]   # context for the typed reply
 
 
-def test_tapping_the_even_split_sets_the_occupancy_and_goes_on_to_the_rates(sent, monkeypatch):
-    resolved = []
-    monkeypatch.setattr("yta.web._resolve", lambda pk: resolved.append(pk.stay.occupancy) or {"room_map": {"matched": False}})
+def test_ask_buttons_are_only_escapes_plus_show_anyway_where_it_is_possible(sent):
+    for field, anyway in (("hotel.name", False), ("stay.check_in", False), ("stay.occupancy", True),
+                          ("requested_offer.room_name", True), ("ota_benchmark.final_payable", True)):
+        sent.clear()
+        v7._send_ask("cust", _Packet(), [field], None)
+        ids = [b for b, _ in sent[-1][2]]
+        assert ids == (["show_anyway"] if anyway else []) + ["start_new_chat", "human_help"], field
+        assert not any(i.startswith(("occ_", "date_")) for i in ids)       # never a sample answer
+
+
+def test_show_anyway_is_never_offered_when_the_dates_or_hotel_are_missing(sent):
+    v7._send_ask("cust", _Packet(), ["stay.check_in", "stay.occupancy"], None)
+    assert "show_anyway" not in [b for b, _ in sent[-1][2]]
+    assert "Show my rate anyway" not in sent[-1][1]
+
+
+def test_a_two_room_guest_is_asked_for_the_distribution_not_given_preset_buttons(sent):
+    p = _Packet()
+    p.stay.rooms, p.stay.adults, p.stay.children = 2, 5, 0
+    v7._send_ask("cust", p, ["stay.occupancy"], None, clarify="Could you specify the number of adults?")
+    body = sent[-1][1]
+    assert body.startswith("👥 *How are the 5 adults distributed across the 2 rooms?*")
+    assert "Room 1: 2 adults, Room 2: 3 adults" in body
+    assert not any(b.startswith("occ_") for b, _ in sent[-1][2])
+
+
+def _tap_anyway(sent, packet, missing, intent=None):
+    v7._WA_SESSIONS["cust"] = {"state": "awaiting_field", "packet": packet, "missing": list(missing),
+                               "intent": intent, "unproductive_attempts": 0, "last_activity": time.time()}
+    v7.handle_batch("cust", [{"type": "button_reply", "button_id": "show_anyway", "text": "Show my rate anyway"}])
+
+
+def test_show_anyway_on_missing_guests_assumes_2_adults_states_it_and_skips_the_comparison(sent, monkeypatch):
     p = _split_packet()
-    v7._continue_with_packet("cust", p, None, None)
-    v7.handle_batch("cust", [{"type": "button_reply", "button_id": "split_even", "text": "2 adults in each"}])
-    assert resolved and [o["adults"] for o in resolved[0]] == [2, 2]
-    assert p.stay.occupancy_source == "guest_confirmed"
+    p.stay.occupancy = []
+    p.stay.rooms = None
+    opts = [{"option_id": "o1", "rooms": [{"id": "R1", "name": "Deluxe Room"}], "meal_basis": "Room Only",
+             "refundable": True, "currency": "INR", "total_price": 20000.0}]
+    monkeypatch.setattr("yta.web._resolve", lambda pk: {
+        "detail": {"hotel_name": "H", "options": opts},
+        "room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+            {"option_id": "o1", "room_type_id": "R1", "room_name": "Deluxe Room", "currency": "INR",
+             "total_price": 20000.0}]}})
+    _tap_anyway(sent, p, ["stay.occupancy"])
+    kind, body, buttons = next(m for m in reversed(sent) if m[0] == "buttons")
+    assert "Assumed:* 1 room, 2 adults" in body
+    assert "better rate" not in body.lower() and "you save" not in body.lower()   # not like-for-like
+    assert "Pocket Stays price" in body and "confirm_book" in [b for b, _ in buttons]
+    assert p.stay.occupancy_source == "assumed_default"
 
 
-def test_no_even_split_shortcut_when_children_are_in_the_totals(sent):
-    p = _split_packet()
-    p.stay.occupancy = [{"adults": 2, "children": 1, "child_ages": [5]}] * 2
-    v7._continue_with_packet("cust", p, None, None)
-    assert "split_even" not in [b for b, _ in sent[-1][2]]
+def test_show_anyway_on_a_missing_price_shows_our_rate_without_a_comparison(sent, monkeypatch):
+    p = _RecPacket(missing=["ota_benchmark.final_payable"])
+    opts = [{"option_id": "o1", "rooms": [{"id": "R1", "name": "Deluxe Room"}], "meal_basis": "Room Only",
+             "refundable": True, "currency": "INR", "total_price": 20000.0}]
+    monkeypatch.setattr("yta.web._resolve", lambda pk: {
+        "detail": {"hotel_name": "H", "options": opts},
+        "room_map": {"matched": True, "ratekey_option_ids": ["o1"], "rate_options": [
+            {"option_id": "o1", "room_type_id": "R1", "room_name": "Deluxe Room", "currency": "INR",
+             "total_price": 20000.0}]}})
+    p.ota_benchmark.final_payable = None
+    _tap_anyway(sent, p, ["ota_benchmark.final_payable"])
+    assert getattr(p, "_skip_price", False) is True
+    assert any("Pocket Stays price" in m[1] for m in sent if m[0] == "buttons")
 
 
-def test_stale_even_split_tap_after_a_restart_gets_the_expired_reply(sent):
-    v7.handle_batch("cust", [{"type": "button_reply", "button_id": "split_even", "text": "2 adults in each"}])
+def test_show_anyway_on_a_missing_room_switches_to_listing_all_rooms(sent, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(v7, "_continue_with_packet", lambda frm, pk, url, intent: seen.update(intent=intent))
+    _tap_anyway(sent, _Packet(missing=["requested_offer.room_name"]), ["requested_offer.room_name"], intent="deal")
+    assert seen["intent"] == "search"
+
+
+def test_a_stale_show_anyway_tap_after_a_restart_gets_the_expired_reply(sent):
+    v7.handle_batch("cust", [{"type": "button_reply", "button_id": "show_anyway", "text": "x"}])
+    assert "expired" in sent[-1][1].lower()
+
+
+def test_a_year_less_date_typed_in_a_follow_up_gets_year_buttons_not_a_text_question(sent, monkeypatch):
+    # Live 2026-10-07: "22 dec se 24 dec" got a text-only "which year?" with no
+    # buttons -- the year flow only ran on the first extraction.
+    monkeypatch.setattr("yta.extract_llm.extract_clarification_ex",
+                        lambda *a, **kw: ({"stay.check_in": "12-22", "stay.check_out": "12-24"}, None, True))
+    _open_awaiting(missing=("stay.check_in", "stay.check_out"))
+    v7.handle_batch("cust", [{"type": "text", "text": "22 dec se 24 dec"}])
     kind, body, buttons = sent[-1]
-    assert "expired" in body.lower()
+    assert body.startswith("📅 *Which year is 22 Dec – 24 Dec?*")
+    assert [b for b, _ in buttons][:2] == ["year_0", "year_1"]
+    assert v7._WA_SESSIONS["cust"]["state"] == "awaiting_year"
+
+
+def test_month_day_dates_are_split_out_only_when_both_are_year_less():
+    f, ym = v7._pull_month_day_dates({"stay.check_in": "12-22", "stay.check_out": "12-24", "x": 1})
+    assert ym == {"check_in": (12, 22), "check_out": (12, 24)} and f == {"x": 1}
+    f, ym = v7._pull_month_day_dates({"stay.check_in": "2027-12-22", "stay.check_out": "2027-12-24"})
+    assert ym == {} and "stay.check_in" in f
+    f, ym = v7._pull_month_day_dates({"stay.check_in": "12-22"})
+    assert ym == {}
+
 
 
 # -- LLM outage is OUR problem, never counted against the guest -------------
@@ -999,3 +1085,19 @@ def test_the_reference_room_survives_explore_then_pick_the_original(sent):
                                "savings_line": None, "confirm_line": None, "last_activity": time.time()}
     v7.handle_batch("cust", [{"type": "button_reply", "button_id": "explore_other_rooms", "text": "x"}])
     assert v7._WA_SESSIONS["cust"]["resolution"]["reference_room_type_id"] == "R1"
+
+
+def test_show_anyway_is_not_offered_for_guests_when_the_guest_already_said_several_rooms(sent):
+    # "1 room, 2 adults" would contradict a guest who just said "2 rooms".
+    p = _Packet()
+    p.stay.rooms = 2
+    v7._send_ask("cust", p, ["stay.occupancy"], None)
+    assert "show_anyway" not in [b for b, _ in sent[-1][2]]
+    assert "assume" not in sent[-1][1]
+
+
+def test_the_assumption_line_only_promises_what_the_bot_can_actually_do():
+    p = _Packet()
+    p._assumptions = ["1 room, 2 adults"]
+    line = v7._assumption_line(p)
+    assert "start over" in line.lower() and "tell me if" not in line.lower()

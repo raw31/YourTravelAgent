@@ -107,6 +107,9 @@ READING OTA URL PARAMETERS
   = adults, `p`/`ch` = children), or plain `adults=`/`children=`/`rooms=`
   params. If only a total is shown ("2 rooms, 4 adults, 2 children") set the
   aggregates and leave `occupancy` [].
+  NEVER default stay.rooms to 1 (or adults to 2): when the content states
+  neither a room count nor any guest count, leave stay.rooms, stay.adults and
+  stay.children null — the guest is asked.
 - Agoda `/book/`: `roomName` = room name; `isBreakfastIncluded=false` ->
   "Room only"; `isEasyCancel=false` -> "Non-refundable"; `roomToken` `sai:`
   -> final_payable, `rcy:` -> currency; `h:<id>` is the Agoda hotel id (NOT
@@ -262,21 +265,32 @@ def extract_clarification_ex(missing_paths: list, reply_text: str,
         f"{json.dumps(wanted[0])} — do NOT nest by splitting on the dot "
         "(that means NOT {\"" + wanted[0].split(".")[0] + "\": {\"" +
         wanted[0].split(".", 1)[1] + "\": ...}}).\n\n"
-        "Shape notes: dates as YYYY-MM-DD; stay.occupancy as an array of "
+        "Shape notes: dates as YYYY-MM-DD ONLY when a year is actually stated; when the reply gives "
+        "just a day and month, return it as MM-DD (e.g. \"12-22\") for BOTH stay.check_in and "
+        "stay.check_out — never guess a year, and do NOT raise a clarify question about the year "
+        "(the system asks the guest itself); stay.occupancy as an array of "
         "{adults, children, child_ages} objects, one per room; stay.rooms as "
         "a plain integer; ota_benchmark.final_payable as a plain number, no "
         "currency symbol or thousands separators.\n\n"
         "Also include a \"clarify\" key: a short, specific one-sentence "
         "question, referencing what they already said, ONLY if the reply "
         "gave PARTIAL or ambiguous info for one of these fields that you "
-        "could not fully resolve (e.g. they said \"24 Sept to 25 Sept\" "
-        "with no year -> ask which year; they said \"me and my wife\" for "
+        "could not fully resolve (e.g. they said \"me and my wife\" for "
         "occupancy with an unclear room count -> ask that; they said "
         "\"4 adults\" or any other bare total headcount with NO room count "
         "mentioned -> leave stay.occupancy/stay.rooms null and ask "
         "specifically how many rooms and how many guests in each — never "
         "assume everyone is in one room just because only a total was "
-        "given). Use null for \"clarify\" if the reply either fully "
+        "given; but if they gave the NUMBER OF ROOMS and a total headcount "
+        "without saying who is in which room, e.g. \"2 rooms, 5 guests\" or "
+        "\"2 room 5 log\", DO return stay.rooms as that integer, leave "
+        "stay.occupancy null, and ask how the guests are distributed across "
+        "those rooms — never split them evenly yourself). When they DO say who "
+        "is in each room, fill stay.occupancy, one object per room, in the order "
+        "given: \"one room 2 people, the other 3 people\" / \"ek kamre me do log, "
+        "dusre kamre me 3 log\" / \"room 1: 2, room 2: 3\" -> adults 2 and adults 3 "
+        "(people / guests / persons / log / members mean ADULTS unless children "
+        "or ages are mentioned; do not ask adults-vs-children for those). Use null for \"clarify\" if the reply either fully "
         "answered a field or didn't address it at all — don't invent a "
         "question otherwise."
     )
