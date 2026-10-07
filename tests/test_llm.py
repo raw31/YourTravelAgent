@@ -95,19 +95,35 @@ def test_openai_compat_413_still_becomes_size_limit(monkeypatch):
 #    then 429'd on quota, while flash-lite still answered; vision is Gemini-only) --
 
 def _fake_genai(monkeypatch, behaviour):
-    """behaviour(api_key, model) -> text or raises. Records (key, model) tried."""
-    import sys
+    """behaviour(api_key, model) -> text or raises. Records (key, model) tried.
+
+    Mimics the real SDK's ownership: `client.models` does NOT keep the Client
+    alive, and a Client that is garbage-collected closes its HTTP client -- the
+    bug that made every Gemini call fail ("Cannot send a request, as the client
+    has been closed") when the client was created inline."""
     import types as _t
     calls = []
 
-    class _Client:
-        def __init__(self, api_key=None, **kw):
-            self._key = api_key
-            self.models = self
+    class _Api:
+        closed = False
+
+    class _Models:
+        def __init__(self, api, key):
+            self._api, self._key = api, key
 
         def generate_content(self, model, contents, config):
+            if self._api.closed:
+                raise RuntimeError("Cannot send a request, as the client has been closed.")
             calls.append((self._key, model))
             return _t.SimpleNamespace(text=behaviour(self._key, model))
+
+    class _Client:
+        def __init__(self, api_key=None, **kw):
+            self._api = _Api()
+            self.models = _Models(self._api, api_key)
+
+        def __del__(self):
+            self._api.closed = True
 
     from google import genai as real_genai          # keep .types etc.; only swap the client
     monkeypatch.setattr(real_genai, "Client", _Client)

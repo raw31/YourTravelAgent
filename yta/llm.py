@@ -335,7 +335,12 @@ def _gemini(system, parts, model, key, max_tokens, retries=1):
             break                              # a guest has waited long enough; report the failure
         for attempt in range(retries):
             try:
-                return _client(k).models.generate_content(
+                # Keep a reference for the whole call: a temporary Client is
+                # garbage-collected (and its HTTP client CLOSED) before the
+                # request is sent -> "Cannot send a request, as the client has
+                # been closed".
+                client = _client(k)
+                return client.models.generate_content(
                     model=mdl, contents=contents, config=cfg).text
             except ServerError as e:
                 last = e
