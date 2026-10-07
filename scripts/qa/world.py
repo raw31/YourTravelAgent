@@ -43,6 +43,7 @@ os.environ["WHATSAPP_VERIFY_TOKEN"] = "qa"
 os.environ["YTA_WA_FLOW"] = "v7"
 _TMP = tempfile.mkdtemp(prefix="yta_qa_")
 os.environ["YTA_LEADS_DB"] = str(Path(_TMP) / "leads.db")
+os.environ["YTA_LLM_PARK_FILE"] = str(Path(_TMP) / "llm_parking.json")   # QA never touches real parking state
 
 # .env is loaded by yta.llm; it must not overwrite our fakes
 _ENV_FILE = ROOT / ".env"

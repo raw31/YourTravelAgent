@@ -22,6 +22,8 @@ import os
 import time
 from pathlib import Path
 
+from yta import llm_pool
+
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -51,8 +53,7 @@ _KEY_ENV = {
 _TEXT_PRIORITY = ["groq", "grok", "openai", "gemini", "anthropic"]
 _VISION_PRIORITY = ["gemini", "anthropic"]
 _GEMINI_FALLBACK = "gemini-flash-lite-latest"
-_GEMINI_SKIP_UNTIL: dict = {}      # (key-suffix, model) -> epoch seconds until which the slot is skipped
-_GEMINI_BREAKER_SEC = 300
+_SHORT_PARK_SEC = 300              # a hang / 5xx other than 503: skip the slot briefly
 _GEMINI_TOTAL_BUDGET_SEC = 50      # stop trying further slots once a call has taken this long
 
 
@@ -107,6 +108,71 @@ def resolve_vision():
             "(Gemini) or ANTHROPIC_API_KEY in YourTravelAgent/.env.")
 
 
+import re as _re
+
+_MINUTE_MARKERS = ("per minute", "perminute", "tokens per minute", "(tpm)", "(rpm)", "requests per minute")
+_DAILY_MARKERS = ("per day", "perday", "daily", "(tpd)", "(rpd)", "requests per day", "tokens per day")
+
+
+def _retry_after_seconds(msg: str):
+    """Seconds the provider says to wait ("try again in 12m51.4s", "retryDelay: '37s'"), else None."""
+    m = _re.search(r"try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", msg)
+    if m and any(m.groups()):
+        h, mi, sec = (float(x) if x else 0.0 for x in m.groups())
+        return h * 3600 + mi * 60 + sec
+    m = _re.search(r"retrydelay['\"]?\s*[:=]\s*['\"]?([\d.]+)s", msg)
+    return float(m.group(1)) if m else None
+
+
+def classify_error(exc) -> tuple | None:
+    """(park_seconds, reason) when this failure means "stop using this slot for
+    a while", None when it does not (a bad generation, a request that was just
+    too large, a client-side mistake).
+
+      quota (429 / RESOURCE_EXHAUSTED)  per-day or unclear -> 24h, or until the
+                                        provider says the limit lifts if it
+                                        tells us sooner; per-minute -> briefly
+      503 / unavailable / overloaded    24h (per owner policy; see llm_pool: a
+                                        parked slot is still tried last)
+      hang / 500 / 502 / 504 / network  5 min
+    """
+    msg = str(exc).lower()
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    name = type(exc).__name__
+    is_quota = (code == 429 or "resource_exhausted" in msg or "rate limit" in msg
+                or "quota" in msg or "tokens per" in msg)
+    if is_quota:
+        if "too large" in msg and not any(m in msg for m in _DAILY_MARKERS + _MINUTE_MARKERS):
+            return None                                # about THIS request's size, not the key
+        retry = _retry_after_seconds(msg)
+        if any(m in msg for m in _MINUTE_MARKERS) and not any(m in msg for m in _DAILY_MARKERS):
+            return (min(max(retry or 90, 30) + 15, 900), "rate limit (per minute)")
+        if retry and retry < llm_pool.DAY and any(m in msg for m in _DAILY_MARKERS):
+            return (retry + 30, "daily quota, resets sooner than 24h")    # e.g. Groq's rolling TPD window
+        return (llm_pool.DAY, "quota exhausted")
+    if code == 503 or "unavailable" in msg or "overloaded" in msg or "over capacity" in msg:
+        return (llm_pool.DAY, "503 unavailable")
+    if code in (500, 502, 504) or name in ("ServerError", "ReadTimeout", "ConnectTimeout", "Timeout",
+                                          "ConnectionError", "APITimeoutError", "APIConnectionError",
+                                          "DeadlineExceeded") \
+            or "deadline" in msg or "timed out" in msg:
+        return (_SHORT_PARK_SEC, "server error / timeout")
+    return None
+
+
+def _provider_slots(provider: str) -> list:
+    """Every slot id that backs this provider (one per key, x model for Gemini)."""
+    if provider == "gemini":
+        return [llm_pool.slot_id("gemini", k, m) for k in gemini_keys(_key("gemini"))
+                for m in (_model("gemini"), _GEMINI_FALLBACK)]
+    return [llm_pool.slot_id(provider, k) for k in api_keys(_KEY_ENV[provider], _key(provider))]
+
+
+def provider_healthy(provider: str) -> bool:
+    slots = _provider_slots(provider)
+    return any(not llm_pool.is_parked(s) for s in slots) if slots else True
+
+
 def provider_chain(media: bool = False) -> list[str]:
     """Providers to try, in order, for this kind of request — primary first
     then the fallbacks that actually have a key."""
@@ -119,7 +185,14 @@ def provider_chain(media: bool = False) -> list[str]:
         chain = [p for p in chain if p in _VISION_PRIORITY]
     if not chain:
         (resolve_vision if media else resolve)()   # raises the helpful message
-    return chain
+    pinned = bool(forced and forced in order and _key(forced))
+    healthy = [p for p in chain if provider_healthy(p)]
+    parked = [p for p in chain if p not in healthy]
+    if not media and not pinned and len(healthy) > 1:
+        # Mix text traffic across providers so neither burns its daily quota
+        # alone. (Vision has one capable provider, so nothing to mix there.)
+        healthy = llm_pool.order("providers:text", healthy, lambda p: "-")
+    return healthy + parked        # a fully parked provider is still tried, last
 
 
 def active_label() -> str:
@@ -178,34 +251,29 @@ def _complete_one(system, user, max_tokens, media, provider, retries):
                           max_tokens, retries), provider, model
 
 
-_KEY_SKIP_UNTIL: dict = {}        # (provider, key-suffix) -> epoch seconds the key is skipped until
-_KEY_BREAKER_SEC = 120
 _QUOTA_MARKERS = ("tokens per", "tpd", "tpm", "rate limit reached", "requests per day")
 
 
 def _openai_compat(provider, system, user, model, key, max_tokens, retries):
-    """One request against an OpenAI-compatible provider, trying every
-    configured key for it (e.g. GROQ_API_KEY, GROQ_API_KEY_2) until one
-    answers. A key that hit its per-minute/day quota is skipped for a couple of
-    minutes; a bad generation or other error just moves on to the next key.
-    Only when every key failed does the error propagate (and complete() then
-    fails over to the next provider)."""
-    keys = api_keys(_KEY_ENV[provider], key)
+    """One request against an OpenAI-compatible provider, across every
+    configured key for it (e.g. GROQ_API_KEY, GROQ_API_KEY_2). Healthy keys are
+    used round-robin (so no key's daily quota burns alone); a key that hit a
+    quota error or a 503 is parked (see classify_error / llm_pool) and tried
+    only as a last resort. Only when every key failed does the error propagate
+    -- and complete() then fails over to the next provider."""
+    keys = llm_pool.order(f"keys:{provider}", api_keys(_KEY_ENV[provider], key),
+                          lambda k: llm_pool.slot_id(provider, k))
     last = None
     for k in keys:
-        slot = (provider, k[-6:])
-        if time.time() < _KEY_SKIP_UNTIL.get(slot, 0):
-            continue
         try:
             return _openai_compat_one(provider, system, user, model, k, max_tokens, retries)
-        except SizeLimitError as e:
+        except Exception as e:  # noqa: BLE001 -- bad generation, quota, 5xx, network: next key
             last = e
-            if any(m in str(e).lower() for m in _QUOTA_MARKERS):      # THIS key is out of quota
-                _KEY_SKIP_UNTIL[slot] = time.time() + _KEY_BREAKER_SEC
-        except Exception as e:  # noqa: BLE001 -- bad generation, 5xx, network: try the next key
-            last = e
+            c = classify_error(e)
+            if c:
+                llm_pool.park(llm_pool.slot_id(provider, k), c[0], f"{provider} {c[1]}")
     if last is None:
-        last = LLMUnavailable(f"every {provider} key is cooling down after recent quota errors")
+        last = LLMUnavailable(f"no {provider} key configured")
     raise last
 
 
@@ -324,13 +392,16 @@ def _gemini(system, parts, model, key, max_tokens, retries=1):
     # 2026-10-07: gemini-flash-latest 504'd after 60s while flash-lite
     # answered in 1s -- each screenshot cost ~50s). Keys are only ever
     # identified by their last 6 chars here, never logged in full.
-    keys = gemini_keys(key)
+    # Primary model on every key first (quality), then the weaker fallback model
+    # on every key; healthy slots before parked ones (parked = last resort).
+    # Keys rotate round-robin per call so the daily quota is shared. Each
+    # (key, model) is its own slot -- a model's quota is per model.
+    keys = llm_pool.order("keys:gemini", gemini_keys(key), lambda k: llm_pool.slot_id("gemini", k))
     slots = [(k, model) for k in keys] + [(k, _GEMINI_FALLBACK) for k in keys]
+    slots.sort(key=lambda sm: llm_pool.is_parked(llm_pool.slot_id("gemini", sm[0], sm[1])))   # stable
     started, last = time.time(), None
     for k, mdl in slots:
-        slot = (k[-6:], mdl)
-        if time.time() < _GEMINI_SKIP_UNTIL.get(slot, 0):
-            continue
+        sid = llm_pool.slot_id("gemini", k, mdl)
         if last is not None and time.time() - started > _GEMINI_TOTAL_BUDGET_SEC:
             break                              # a guest has waited long enough; report the failure
         for attempt in range(retries):
@@ -342,15 +413,13 @@ def _gemini(system, parts, model, key, max_tokens, retries=1):
                 client = _client(k)
                 return client.models.generate_content(
                     model=mdl, contents=contents, config=cfg).text
-            except ServerError as e:
+            except Exception as e:  # noqa: BLE001
                 last = e
-                _GEMINI_SKIP_UNTIL[slot] = time.time() + _GEMINI_BREAKER_SEC
-            except Exception as e:
-                last = e
-                _GEMINI_SKIP_UNTIL[slot] = time.time() + _GEMINI_BREAKER_SEC
+                c = classify_error(e)
+                llm_pool.park(sid, c[0] if c else _SHORT_PARK_SEC, f"gemini {c[1] if c else type(e).__name__}")
                 break
     if last is None:
-        last = RuntimeError("every Gemini key/model is cooling down after recent failures")
+        last = RuntimeError("no Gemini key configured")
     raise last
 
 

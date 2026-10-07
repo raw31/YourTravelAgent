@@ -136,8 +136,7 @@ def _quota():
 
 
 def _clean_env(monkeypatch, **keys):
-    from yta import llm
-    llm._GEMINI_SKIP_UNTIL.clear()
+    from yta import llm  # noqa: F401  (pool state is reset by tests/conftest.py)
     for n in ["GOOGLE_API_KEY", "GOOGLE_API_KEYS"] + [f"GOOGLE_API_KEY_{i}" for i in range(2, 10)]:
         monkeypatch.delenv(n, raising=False)
     for k, v in keys.items():
@@ -196,12 +195,12 @@ def test_when_every_key_and_model_fails_the_error_is_raised_not_swallowed(monkey
 
 
 def test_a_healthy_primary_is_used_and_never_tripped(monkeypatch):
-    from yta import llm
+    from yta import llm, llm_pool
     _clean_env(monkeypatch, GOOGLE_API_KEY="k1")
     calls = _fake_genai(monkeypatch, lambda key, model: '{"ok": true}')
     llm._gemini("s", ["u"], "gemini-flash-latest", "k1", 50)
     llm._gemini("s", ["u"], "gemini-flash-latest", "k1", 50)
-    assert calls == [("k1", "gemini-flash-latest")] * 2 and not llm._GEMINI_SKIP_UNTIL
+    assert calls == [("k1", "gemini-flash-latest")] * 2 and llm_pool.status() == []
 
 
 # -- complete(): every caller that does not pin a provider gets full failover ----
@@ -258,8 +257,7 @@ def test_vision_requests_only_chain_through_vision_capable_providers(monkeypatch
 # -- Groq (OpenAI-compatible) multi-key failover --------------------------------
 
 def _clean_groq(monkeypatch, **keys):
-    from yta import llm
-    llm._KEY_SKIP_UNTIL.clear()
+    from yta import llm  # noqa: F401
     for n in ["GROQ_API_KEY", "GROQ_API_KEYS"] + [f"GROQ_API_KEY_{i}" for i in range(2, 10)]:
         monkeypatch.delenv(n, raising=False)
     for k, v in keys.items():
@@ -289,7 +287,7 @@ def test_a_groq_key_over_its_quota_fails_over_to_the_next_groq_key(monkeypatch):
     assert used == ["g1", "g2"]
     used.clear()
     llm._openai_compat("groq", "s", "u", "m", "g1", 50, 0)
-    assert used == ["g2"]                       # g1 is cooling down after its quota error
+    assert used == ["g2"]                       # g1 is parked after its quota error
 
 
 def test_a_request_too_large_error_does_not_put_a_groq_key_on_cooldown(monkeypatch):
@@ -303,7 +301,8 @@ def test_a_request_too_large_error_does_not_put_a_groq_key_on_cooldown(monkeypat
         llm._openai_compat("groq", "s", "u", "m", "g1", 50, 0)
     except llm.SizeLimitError:
         pass
-    assert not llm._KEY_SKIP_UNTIL              # that is about the request, not the key
+    from yta import llm_pool
+    assert llm_pool.status() == []              # that is about the request, not the key
 
 
 def test_a_bad_generation_moves_to_the_next_groq_key_then_raises_when_all_fail(monkeypatch):
@@ -319,3 +318,176 @@ def test_a_bad_generation_moves_to_the_next_groq_key_then_raises_when_all_fail(m
     with pytest.raises(llm.GenerationFailed):
         llm._openai_compat("groq", "s", "u", "m", "g1", 50, 0)
     assert used == ["g1", "g2"]
+
+
+# ==========================================================================
+# Key/provider rotation: park on quota or 503 for 24h, mix when healthy,
+# the other provider as each one's fallback (owner's design, 2026-10-07)
+# ==========================================================================
+
+class _Err(Exception):
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.status_code = code
+
+
+def test_a_daily_quota_error_parks_for_24_hours():
+    from yta import llm, llm_pool
+    sec, why = llm.classify_error(_Err("Rate limit reached ... on tokens per day (TPD): Limit 200000", 429))
+    assert sec == llm_pool.DAY - 0 or sec > 0
+    sec2, _ = llm.classify_error(_Err("429 RESOURCE_EXHAUSTED. You exceeded your current quota", 429))
+    assert sec2 == llm_pool.DAY
+
+
+def test_groqs_rolling_daily_window_parks_only_until_it_lifts():
+    from yta import llm
+    sec, why = llm.classify_error(_Err("Rate limit reached on tokens per day (TPD). Please try again in 12m51.4s.", 429))
+    assert 12 * 60 < sec < 14 * 60 and "daily" in why          # honours the provider's own reset time
+
+
+def test_a_per_minute_rate_limit_parks_only_briefly():
+    from yta import llm
+    sec, why = llm.classify_error(_Err("Rate limit reached on tokens per minute (TPM). Please try again in 8s.", 429))
+    assert sec < 120 and "minute" in why
+
+
+def test_a_503_parks_for_24_hours_and_other_5xx_or_hangs_only_briefly():
+    from yta import llm, llm_pool
+    assert llm.classify_error(_Err("503 UNAVAILABLE. The model is overloaded", 503))[0] == llm_pool.DAY
+    assert llm.classify_error(_Err("504 DEADLINE_EXCEEDED", 504))[0] == 300
+    assert llm.classify_error(TimeoutError("timed out"))[0] == 300
+
+
+def test_bad_generations_and_oversized_requests_never_park_anything():
+    from yta import llm
+    assert llm.classify_error(llm.GenerationFailed("Failed to validate JSON")) is None
+    assert llm.classify_error(_Err("Request too large for model", 413)) is None
+    assert llm.classify_error(ValueError("whatever")) is None
+
+
+def test_order_puts_healthy_first_rotates_them_and_keeps_parked_as_last_resort():
+    from yta import llm_pool
+    slot = lambda k: f"s:{k}"          # noqa: E731
+    llm_pool.park("s:b", 3600, "test")
+    first = llm_pool.order("g", ["a", "b", "c"], slot)
+    second = llm_pool.order("g", ["a", "b", "c"], slot)
+    assert first == ["a", "c", "b"] and second == ["c", "a", "b"]      # rotates; parked "b" always last
+    assert llm_pool.order("g2", ["b"], slot) == ["b"]                   # all parked -> still tried
+
+
+def test_parking_expires_and_unpark_works():
+    from yta import llm_pool
+    llm_pool.park("x", 3600, "t")
+    assert llm_pool.is_parked("x")
+    import time as _t
+    llm_pool._PARK["x"] = _t.time() - 1                 # time passes
+    assert not llm_pool.is_parked("x")
+    llm_pool.park("y", 3600, "t")
+    llm_pool.unpark("y")
+    assert not llm_pool.is_parked("y")
+
+
+def test_parking_survives_a_restart_and_stores_no_key_material(tmp_path, monkeypatch):
+    import json
+    from yta import llm_pool
+    f = tmp_path / "persist.json"
+    monkeypatch.setenv("YTA_LLM_PARK_FILE", str(f))
+    llm_pool.reset()
+    sid = llm_pool.slot_id("gemini", "AIzaSySECRETKEY123456", "gemini-flash-latest")
+    llm_pool.park(sid, 3600, "quota exhausted")
+    raw = f.read_text()
+    assert "SECRETKEY" not in raw and sid in json.loads(raw)       # only a hash is stored
+    llm_pool._PARK.clear()
+    llm_pool._LOADED = False                                        # simulate a fresh process
+    assert llm_pool.is_parked(sid)
+
+
+def test_a_gemini_key_that_hit_its_quota_is_parked_and_the_other_key_takes_over(monkeypatch):
+    from yta import llm, llm_pool
+    _clean_env(monkeypatch, GOOGLE_API_KEY="k1", GOOGLE_API_KEY_2="k2")
+
+    def behave(key, model):
+        if key == "k1":
+            raise _quota()
+        return '{"ok": true}'
+    _fake_genai(monkeypatch, behave)
+    llm._gemini("s", ["u"], "gemini-flash-latest", "k1", 50)
+    parked = llm_pool.status()
+    assert len(parked) == 1 and "gemini" in parked[0][0] and parked[0][1] > 23 * 3600
+
+
+def test_healthy_gemini_keys_are_used_in_rotation_so_no_daily_quota_burns_alone(monkeypatch):
+    from yta import llm
+    _clean_env(monkeypatch, GOOGLE_API_KEY="k1", GOOGLE_API_KEY_2="k2")
+    calls = _fake_genai(monkeypatch, lambda key, model: '{"ok": true}')
+    for _ in range(4):
+        llm._gemini("s", ["u"], "gemini-flash-latest", "k1", 50)
+    assert [k for k, _ in calls] == ["k1", "k2", "k1", "k2"]
+
+
+def test_healthy_groq_keys_are_also_rotated(monkeypatch):
+    from yta import llm
+    _clean_groq(monkeypatch, GROQ_API_KEY="g1", GROQ_API_KEY_2="g2")
+    used = []
+    monkeypatch.setattr(llm, "_openai_compat_one",
+                        lambda provider, s, u, m, key, mt, r: used.append(key) or '{"ok": true}')
+    for _ in range(4):
+        llm._openai_compat("groq", "s", "u", "m", "g1", 50, 0)
+    assert used == ["g1", "g2", "g1", "g2"]
+
+
+def _two_providers(monkeypatch):
+    from yta import llm
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    extra = [f"{b}_{i}" for b in ("GROQ_API_KEY", "GOOGLE_API_KEY") for i in range(2, 10)]   # .env leaks _2 keys in
+    for n in ("GROQ_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+              "GROQ_API_KEYS", "GOOGLE_API_KEYS", *extra):
+        monkeypatch.delenv(n, raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "g1")
+    monkeypatch.setenv("GOOGLE_API_KEY", "k1")
+    return llm
+
+
+def test_text_requests_alternate_between_groq_and_gemini_when_both_are_healthy(monkeypatch):
+    llm = _two_providers(monkeypatch)
+    firsts = [llm.provider_chain(False)[0] for _ in range(4)]
+    assert firsts == ["groq", "gemini", "groq", "gemini"]
+    assert all(sorted(llm.provider_chain(False)) == ["gemini", "groq"] for _ in range(3))   # each is the other's fallback
+
+
+def test_a_fully_parked_provider_moves_to_the_end_of_the_chain(monkeypatch):
+    from yta import llm_pool
+    llm = _two_providers(monkeypatch)
+    llm_pool.park(llm_pool.slot_id("groq", "g1"), 3600, "test")
+    assert [llm.provider_chain(False) for _ in range(3)] == [["gemini", "groq"]] * 3
+
+
+def test_a_provider_with_one_healthy_key_left_is_still_healthy(monkeypatch):
+    from yta import llm_pool
+    llm = _two_providers(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY_2", "g2")
+    llm_pool.park(llm_pool.slot_id("groq", "g1"), 3600, "test")
+    assert llm.provider_healthy("groq") is True
+    llm_pool.park(llm_pool.slot_id("groq", "g2"), 3600, "test")
+    assert llm.provider_healthy("groq") is False
+
+
+def test_a_pinned_provider_is_never_rotated_away(monkeypatch):
+    llm = _two_providers(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    assert [llm.provider_chain(False)[0] for _ in range(4)] == ["gemini"] * 4
+
+
+def test_vision_chain_is_not_rotated(monkeypatch):
+    llm = _two_providers(monkeypatch)
+    assert [llm.provider_chain(True) for _ in range(3)] == [["gemini"]] * 3      # Groq cannot read images
+
+
+def test_when_everything_is_parked_the_parked_slots_are_still_tried(monkeypatch):
+    from yta import llm, llm_pool
+    _clean_env(monkeypatch, GOOGLE_API_KEY="k1")
+    for m in ("gemini-flash-latest", llm._GEMINI_FALLBACK):
+        llm_pool.park(llm_pool.slot_id("gemini", "k1", m), 86400, "test")
+    calls = _fake_genai(monkeypatch, lambda key, model: '{"ok": true}')
+    assert llm._gemini("s", ["u"], "gemini-flash-latest", "k1", 50) == '{"ok": true}'
+    assert calls == [("k1", "gemini-flash-latest")]          # a wrongly parked key can't take the bot offline
