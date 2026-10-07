@@ -92,12 +92,16 @@ class Run:
                 if junk in f" {blob} " and not (junk == "nan" and "nan" not in blob.split()):
                     if junk in (" none ",) or junk in ("{", "}", "[object"):
                         self.check(False, f"junk token {junk!r} in message: {m.text[:80]!r}")
-            if "So far:" in m.text:                       # an ask: the QUESTION must lead
+            if m.kind == "buttons" and m.text.startswith(("📅", "👥", "🏨 *Which", "🛏️", "💳", "❓")):   # an ask
                 first = m.text.splitlines()[0]
-                self.check("?" in first or first.startswith(("📅", "👥", "🏨", "🛏️", "💳")),
-                           f"ask does not lead with its question: {first[:70]!r}")
-                self.check(not m.text.startswith(("Here's what I have", "Got it all", "Just about set",
-                                                  "Almost there")), "ask opens with a recap, not the question")
+                self.check("?" in first, f"ask does not lead with its question: {first[:70]!r}")
+                self.check("Price shown" not in m.text and "So far" not in m.text,
+                           "a follow-up ask copied the stay details back")
+            if m.kind == "list" and m.rows:               # hotel-level cheapest is always on top
+                import re as _re
+                prices = [float(_re.sub(r"[^\d.]", "", r[1])) for r in m.rows if _re.search(r"\d", r[1])]
+                self.check(prices and prices[0] == min(prices),
+                           f"cheapest room is not at the top of the list: first={prices[:1]} min={min(prices) if prices else None}")
             for bid in m.ids():
                 self.check(not bid.startswith(("occ_", "date_")), f"sample-value button/row offered: {bid}")
             if GENERIC_ERR in blob and not expect_error:
@@ -292,7 +296,7 @@ def s7(r: Run):
     r.check(lst is not None, "unmatched room did not fall back to a room list")
     if lst:
         r.check("starting from" in lst.text.lower(), "no price anchor on unmatched-room list")
-        new = r.do("tap", lst.rows[0][0])
+        new = r.do("tap", lst.rows[-1][0])        # not the nearest match (row 1) -> a different room
         r.check(not r.has(new, "better rate") and not r.has(new, "you save"),
                 "claimed a saving for a room the OTA price was never for")
         r.check(r.has(new, "pocket stays price"), "plain-rate message missing")

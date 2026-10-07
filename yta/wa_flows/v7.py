@@ -737,6 +737,41 @@ def _handle_not_cheaper(frm: str, session: dict, items: list, button_id) -> None
         [("see_other_rooms", "See other rooms"), ("try_another", "Try another hotel")])
 
 
+def _cap_rows(groups: list, limit: int, keep: str | None = None) -> list:
+    """Trim `groups` so their options total at most `limit` rows, dropping from
+    the END (the priciest rooms) -- the hotel's cheapest rate is never what gets
+    cut. `keep` (the guest's nearest-match room) is retained even if it sits
+    beyond the limit, at the cost of the priciest other rooms. Keeps the
+    session's option list 1:1 with the rows the guest can actually see and tap
+    (an ambiguous list can be 6 rooms x 2 = 12 rows)."""
+    def _opts(g):
+        return g.get("options") or []
+    chosen, used = [], 0
+    keeper = next((g for g in groups if keep and g.get("room_type_id") == keep), None)
+    reserve = len(_opts(keeper)[:limit]) if keeper is not None else 0
+    for g in groups:
+        if g is keeper:
+            continue
+        take = _opts(g)[: max(limit - used - reserve, 0)] if keeper is not None else _opts(g)[: limit - used]
+        if not take:
+            continue
+        used += len(take)
+        chosen.append((g, take))
+    out = []
+    for g in groups:                                    # restore the original (cheapest-first) order
+        if g is keeper:
+            out.append({**g, "options": _opts(g)[:limit]})
+        else:
+            hit = next((t for gg, t in chosen if gg is g), None)
+            if hit:
+                out.append({**g, "options": hit})
+    return out
+
+
+def _group_price(g: dict) -> float:
+    return min((o.get("total_price") or float("inf") for o in (g.get("options") or [])), default=float("inf"))
+
+
 def _present_option_choices(frm: str, packet, resolution: dict) -> None:
     """The no-requested-room path: resolution["room_options"]
     (yta.roommap.list_cheapest_rooms()) names up to 5 DISTINCT rooms
@@ -752,6 +787,12 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
     holding the FLATTENED option list for that reply, same as before."""
     rz = resolution or {}
     groups = (rz.get("room_options") or {}).get("groups") or []
+    nearest_id = (rz.get("room_options") or {}).get("nearest_match_room_type_id")
+    # Owner policy: the hotel-level CHEAPEST room is always at the top of any room
+    # list (explore / see other rooms / no match / ambiguous). The nearest match is
+    # still kept in the list, and called out in the text, just not placed first.
+    groups = sorted(groups, key=_group_price)
+    groups = _cap_rows(groups, 10, keep=nearest_id)   # WhatsApp shows at most 10 list rows
     flat_options = [opt for g in groups for opt in (g.get("options") or [])]
     hotel_name = (rz.get("detail") or {}).get("hotel_name") \
         or (rz.get("match") or {}).get("hotel_name") \
@@ -788,7 +829,7 @@ def _present_option_choices(frm: str, packet, resolution: dict) -> None:
     all_opts = [o for g in groups for o in (g.get("options") or [])]
     ambiguous = (rz.get("room_options") or {}).get("ambiguous_match") and groups
     if ambiguous:
-        nearest = groups[0]   # _resolve() already sorts the nearest match first
+        nearest = next((g for g in groups if nearest_id and g.get("room_type_id") == nearest_id), groups[0])
         nearest_name = _clean_room_name(nearest.get("room_name")) or "a room"
         lines += ["", f"I couldn't confidently match your room to one exact type — "
                        f"closest to what you mentioned: *{nearest_name}*.", ""]
@@ -1130,37 +1171,43 @@ def _can_show_anyway(missing: list, packet=None) -> bool:
     return bool(kinds) and all(k in _SKIPPABLE_KINDS for k in kinds)
 
 
-def _ask_body(packet, kind: str, clarify: str | None, missing: list | None = None) -> str:
-    question, hint = _ASK_TEXT[kind]
-    rooms = getattr(packet.stay, "rooms", None)
-    if kind == "guests" and isinstance(rooms, int) and rooms > 1:
-        # The guest already said how many rooms ("2 room 5 log"), so the one
-        # thing missing is the DISTRIBUTION -- ask exactly that (the generic
-        # guests question, and the old preset buttons, didn't fit it).
-        adults = getattr(packet.stay, "adults", None)
-        kids = getattr(packet.stay, "children", None) or 0
-        who = ""
-        if adults:
-            who = f"{adults + kids} guests" if kids else f"{adults} adults"
-        question = f"👥 *How are the {who or 'guests'} distributed across the {rooms} rooms?*"
-        hint = ("Just type it, e.g. *Room 1: 2 adults, Room 2: 3 adults* "
-                "(add the kids' ages, if any).")
-    elif clarify:                                  # a specific LLM follow-up beats the generic line
-        question, hint = f"❓ *{clarify.strip().rstrip('?')}?*", _ASK_TEXT[kind][1]
-    recap = _recap_block(packet)
-    body = f"{question}\n{hint}"
-    if missing and _can_show_anyway(missing, packet):
-        body += f"\n\nOr tap *Show my rate anyway* — {_assumption_sentence(_missing_kinds(missing))}."
-    if recap:
-        body += f"\n\nSo far:\n{recap}"
+def _ask_body(packet, missing: list, clarify: str | None = None) -> str:
+    """Every open question in ONE message, question(s) first, no recap of what
+    was already read (owner feedback 2026-10-07: "bas question puch, stay
+    information mat copy kar follow-up me har bar", and ask everything at once)."""
+    kinds = _missing_kinds(missing)
+    parts = []
+    for kind in kinds:
+        question, hint = _ASK_TEXT[kind]
+        rooms = getattr(packet.stay, "rooms", None)
+        if kind == "guests" and isinstance(rooms, int) and rooms > 1:
+            # The guest already said how many rooms ("2 room 5 log"), so the one
+            # thing missing is the DISTRIBUTION -- ask exactly that.
+            adults = getattr(packet.stay, "adults", None)
+            kids = getattr(packet.stay, "children", None) or 0
+            who = f"{adults + kids} guests" if (adults and kids) else (f"{adults} adults" if adults else "guests")
+            question = f"👥 *How are the {who} distributed across the {rooms} rooms?*"
+            hint = ("Just type it, e.g. *Room 1: 2 adults, Room 2: 3 adults* "
+                    "(add the kids' ages, if any).")
+        elif clarify and len(clarify) <= 140 and len(kinds) == 1:
+            # The model's own follow-up refines the ONE open question ("how many
+            # children, and how old?"). With several open it tends to rattle them
+            # all off in one long sentence -- the per-field questions are cleaner.
+            question = f"❓ *{clarify.strip().rstrip('?')}?*"
+        parts.append(f"{question}\n{hint}")
+    body = "\n\n".join(parts)
+    if _can_show_anyway(missing, packet):
+        body += f"\n\nOr tap *Show my rate anyway* — {_assumption_sentence(kinds)}."
     return body[:1000]
 
 
 def _send_ask(frm: str, packet, missing: list, intent, clarify: str | None = None) -> None:
-    """The one place every "something is missing" question is sent from:
-    question FIRST, a typed example under it, the facts so far last. Buttons
-    are only ever the two escapes -- no sample answers (a button can carry a
-    wrong suggestion, e.g. "1 room" to a 2-room guest)."""
+    """The one place every "something is missing" question is sent from: ALL the
+    open questions in one message, question first, a typed example under each,
+    nothing else. Buttons are only the escapes (+ "show anyway" where it is
+    possible) -- no sample answers (a button can carry a wrong suggestion, e.g.
+    "1 room" to a 2-room guest). `clarify` (the model's own follow-up) is only
+    used when it refines the single open question, as a short sentence."""
     kind = _first_missing_kind(missing)
     if kind is None:
         wa_send_buttons(frm, clarify or "Could you tell me a bit more?",
@@ -1169,7 +1216,8 @@ def _send_ask(frm: str, packet, missing: list, intent, clarify: str | None = Non
     buttons = [("start_new_chat", "Start over"), ("human_help", "Talk to a human")]
     if _can_show_anyway(missing, packet):
         buttons.insert(0, ("show_anyway", "Show my rate anyway"))
-    wa_send_buttons(frm, _ask_body(packet, kind, clarify, missing), buttons)
+    body = _ask_body(packet, missing, clarify)
+    wa_send_buttons(frm, body, buttons)
 
 
 def _handle_show_anyway(frm: str, session: dict) -> None:
@@ -1334,8 +1382,7 @@ def _ask_room_split(frm: str, packet, intent, hint: dict) -> None:
     wa_send_buttons(
         frm,
         f"👥 *How are the {who} split across the {n} rooms?*\n"
-        f"For example, \"2 adults in each room\", or \"3 adults in room 1 and 1 adult in room 2\".\n\n"
-        f"So far:\n{_recap_block(packet)}",
+        f"For example, \"2 adults in each room\", or \"3 adults in room 1 and 1 adult in room 2\".",
         [("start_new_chat", "Start over"), ("human_help", "Talk to a human")])
 
 

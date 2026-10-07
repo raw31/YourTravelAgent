@@ -393,7 +393,7 @@ def test_missing_occupancy_ask_puts_the_question_first_and_has_no_sample_buttons
     v7.handle_batch("cust", [{"type": "text", "text": "https://booking.com/x is what I picked"}])
     kind, body, buttons = next(m for m in sent if m[0] == "buttons")
     assert body.startswith("👥 *How many rooms, and how many guests in each?*")
-    assert "e.g." in body and body.index("e.g.") < body.index("So far:")
+    assert "e.g." in body and "Price shown" not in body and "Taj" not in body   # question only, no recap
     assert not any(b.startswith("occ_") for b, _ in buttons)               # no sample-value buttons
     assert [b for b, _ in buttons] == ["show_anyway", "start_new_chat", "human_help"]
     assert "assume *1 room, 2 adults*" in body                            # the assumption is stated up front
@@ -846,7 +846,7 @@ def test_split_ask_leads_with_the_question_quotes_the_totals_and_suggests_no_spl
     v7._continue_with_packet("cust", p, None, None)
     kind, body, buttons = sent[-1]
     assert body.startswith("👥 *How are the 4 adults split across the 2 rooms?*")
-    assert body.index("split across") < body.index("So far:")
+    assert "Price shown" not in body and "Taj" not in body                      # question only, no recap
     assert [b for b, _ in buttons] == ["start_new_chat", "human_help"]      # no "2 adults in each"
     s = v7._WA_SESSIONS["cust"]
     assert s["state"] == "awaiting_field" and "2 rooms" in s["clarify_text"]   # context for the typed reply
@@ -1101,3 +1101,93 @@ def test_the_assumption_line_only_promises_what_the_bot_can_actually_do():
     p._assumptions = ["1 room, 2 adults"]
     line = v7._assumption_line(p)
     assert "start over" in line.lower() and "tell me if" not in line.lower()
+
+
+def test_everything_missing_is_asked_in_one_message_question_first_without_a_recap(sent):
+    # Owner: ask it all at once (not one by one), and never copy the stay info
+    # back in a follow-up. Live 2026-10-07 the model's own wall of text buried
+    # the question at the end under a recap.
+    long_q = ("Could you please let me know your check-in and check-out dates, how many rooms "
+              "you need, and the number of adults and children (with their ages) for each room?")
+    v7._send_ask("cust", _Packet(hotel_name="Taj Santacruz"),
+                 ["stay.check_in", "stay.check_out", "stay.rooms", "stay.occupancy"], None, long_q)
+    body = sent[-1][1]
+    assert body.startswith("📅 *What are your check-in and check-out dates?*")
+    assert "👥 *How many rooms, and how many guests in each?*" in body      # asked in the SAME message
+    assert body.index("📅") < body.index("👥")
+    assert "Could you please" not in body and "Taj Santacruz" not in body and "Price shown" not in body
+
+
+def test_a_follow_up_never_repeats_the_stay_details(sent):
+    p = _Packet(hotel_name="Taj Santacruz")
+    p.ota_benchmark.final_payable = 64015.0
+    v7._send_ask("cust", p, ["stay.occupancy", "requested_offer.room_name"], None)
+    body = sent[-1][1]
+    assert "64,015" not in body and "Taj Santacruz" not in body and "So far" not in body
+
+
+def test_a_short_llm_follow_up_for_the_single_open_question_is_still_used(sent):
+    v7._send_ask("cust", _Packet(), ["stay.occupancy"], None, "How many children, and how old are they?")
+    assert sent[-1][1].startswith("❓ *How many children, and how old are they?*")
+
+
+def test_an_ambiguous_room_list_never_exceeds_the_ten_rows_whatsapp_can_show(sent):
+    # Found by the e2e QA run: nearest match + the 5 cheapest rooms x 2 = 12 rows,
+    # and send_list silently dropped the last two while the session still held 12.
+    def grp(i):
+        return {"room_type_id": f"R{i}", "room_name": f"Room {i}",
+                "options": [{"option_id": f"o{i}a", "total_price": 100 + i, "currency": "INR",
+                             "meal_basis": "Room Only", "refundable": True, "room_type_id": f"R{i}"},
+                            {"option_id": f"o{i}b", "total_price": 200 + i, "currency": "INR",
+                             "meal_basis": "Breakfast", "refundable": True, "room_type_id": f"R{i}"}]}
+    res = {"detail": {"hotel_name": "H", "options": []},
+           "room_options": {"groups": [grp(i) for i in range(6)], "ambiguous_match": True,
+                            "nearest_match_room_type_id": "R0"}}
+    v7._present_option_choices("cust", _Packet(), res)
+    kind, body, button_text, sections = next(m for m in sent if m[0] == "list")
+    assert sum(len(rows) for _, rows in sections) == 10
+    assert len(v7._WA_SESSIONS["cust"]["options"]) == 10          # session 1:1 with what is shown
+    assert sections[0][0] == "Room 0"                               # cheapest first (here also the nearest)
+
+
+def _grp(i, price, rid=None):
+    rid = rid or f"R{i}"
+    return {"room_type_id": rid, "room_name": f"Room {i}",
+            "options": [{"option_id": f"o{i}a", "total_price": price, "currency": "INR",
+                         "meal_basis": "Room Only", "refundable": True, "room_type_id": rid},
+                        {"option_id": f"o{i}b", "total_price": price + 3000, "currency": "INR",
+                         "meal_basis": "Breakfast", "refundable": True, "room_type_id": rid}]}
+
+
+def test_the_hotel_level_cheapest_room_is_first_even_when_the_nearest_match_is_pricier(sent):
+    # Owner: "overall hotel-level cheapest sabse uper rahega -- explore rooms, jahan bhi
+    # room list dikha rahe ho". The nearest match used to be forced to the top.
+    groups = [_grp(0, 50000), _grp(1, 20000), _grp(2, 30000)]              # nearest = R0 (priciest)
+    res = {"detail": {"hotel_name": "H", "options": []},
+           "room_options": {"groups": groups, "ambiguous_match": True, "nearest_match_room_type_id": "R0"}}
+    v7._present_option_choices("cust", _Packet(), res)
+    kind, body, button_text, sections = next(m for m in sent if m[0] == "list")
+    assert [t for t, _ in sections] == ["Room 1", "Room 2", "Room 0"]       # cheapest -> priciest
+    assert "closest to what you mentioned: *Room 0*" in body                # the nearest match is still called out
+    assert v7._WA_SESSIONS["cust"]["options"][0]["total_price"] == 20000
+
+
+def test_the_nearest_match_stays_in_the_list_even_when_it_would_fall_off_the_ten_rows(sent):
+    groups = [_grp(i, 10000 + i * 1000) for i in range(6)] + [_grp(9, 99000)]   # nearest R9 is the priciest
+    res = {"detail": {"hotel_name": "H", "options": []},
+           "room_options": {"groups": groups, "ambiguous_match": True, "nearest_match_room_type_id": "R9"}}
+    v7._present_option_choices("cust", _Packet(), res)
+    kind, body, button_text, sections = next(m for m in sent if m[0] == "list")
+    titles = [t for t, _ in sections]
+    assert "Room 9" in titles and titles[0] == "Room 0"                      # kept, cheapest still first
+    assert sum(len(r) for _, r in sections) == 10 and "Room 5" not in titles  # the priciest OTHER room made way
+
+
+def test_every_room_list_is_sorted_cheapest_first(sent):
+    res = {"detail": {"hotel_name": "H", "options": []},
+           "room_options": {"groups": [_grp(0, 40000), _grp(1, 15000), _grp(2, 25000)], "no_match": True}}
+    v7._present_option_choices("cust", _Packet(), res)
+    kind, body, button_text, sections = next(m for m in sent if m[0] == "list")
+    firsts = [rows[0][1] for _, rows in sections]
+    assert firsts == ["INR 15,000", "INR 25,000", "INR 40,000"]
+    assert "starting from INR 15,000" in body
