@@ -404,3 +404,21 @@ def test_a_single_room_name_now_matches_a_two_room_combo():
     offer = Offer(room_name="Luxury Room King Bed")
     rm = map_rooms(opts, offer)
     assert rm.matched and rm.rate_options[0].total_price == 47000
+
+
+def test_a_below_gate_match_carried_only_by_an_llm_confirm_is_treated_as_ambiguous(monkeypatch):
+    # Found by the e2e QA run: with Groq out of quota, Gemini "confirmed" that
+    # "Presidential Ocean Mega Suite Sea View" is "PRESIDENTIAL, SUITE" (score 0.79,
+    # under the 0.85 gate) and the bot quoted it as THE room. Never guess a room:
+    # it must go to the guest as the nearest match instead.
+    from yta.roommap import map_rooms
+    from yta.roommap import match as m
+    from yta.schema import Offer
+    opts = [_combo("o1", ["PRESIDENTIAL, SUITE"], 90000), _combo("o2", ["Deluxe Twin"], 20000)]
+    offer = Offer(room_name="Presidential Ocean Mega Suite Sea View")
+    monkeypatch.setattr(m, "_llm_confirm", lambda offer, bucket: True)
+    rm = map_rooms(opts, offer)
+    assert rm.matched and rm.ambiguous is True
+    assert "treating as ambiguous" in " ".join(rm.notes)
+    monkeypatch.setattr(m, "_llm_confirm", lambda offer, bucket: False)
+    assert map_rooms(opts, offer).matched is False

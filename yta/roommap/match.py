@@ -349,8 +349,15 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
         if _llm_confirm(offer, scored[0]):
             chosen = scored[0]
             band = "good"
+            # Owner policy: never guess a room. The name scored BELOW the gate and
+            # only an LLM's say-so carried it over -- a different LLM (e.g. when
+            # the usual provider is out of quota) can just as easily say yes to
+            # a different room. Offer it as the nearest match for the guest to
+            # confirm from the list instead of quoting it as THE room.
+            ambiguous = True
             notes.append(f"LLM confirmed {scored[0].canonical!r} despite score "
-                         f"{scored[0].score:.2f} < {cfg.MIN_BASE_SCORE}")
+                         f"{scored[0].score:.2f} < {cfg.MIN_BASE_SCORE} -- treating as "
+                         f"ambiguous (the guest picks)")
         else:
             band = "none"
             notes.append(f"closest room {scored[0].canonical!r} scored "
