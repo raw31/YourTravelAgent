@@ -297,7 +297,7 @@ def test_invalid_list_row_id_falls_back_to_numeral_parser(sent):
     _open_choosing_option(options)
     v7.handle_batch("cust", [{"type": "button_reply", "button_id": "opt-99", "text": "??"}])
     assert "cust" in v7._WA_SESSIONS
-    assert any("reply with a number" in m[1].lower() for m in sent if m[0] == "text")
+    assert any("reply with a number" in m[1].lower() for m in sent if m[0] in ("text", "buttons"))
 
 
 def test_show_list_again_resends_as_a_list(sent):
@@ -1208,3 +1208,12 @@ def test_every_room_list_is_sorted_cheapest_first(sent):
     firsts = [rows[0][1] for _, rows in sections]
     assert firsts == ["INR 15,000", "INR 25,000", "INR 40,000"]
     assert "starting from INR 15,000" in body
+
+
+def test_a_wrong_reply_to_the_room_list_gets_a_nudge_with_something_to_tap(sent):
+    # Found by the e2e QA run: the first nudge was a bare text line -- a dead end.
+    _open_choosing_option([_rate("o1", "Deluxe Room", "Room Only", True, 20000.0)])
+    v7.handle_batch("cust", [{"type": "text", "text": "hmm"}])
+    kind, body, buttons = sent[-1]
+    assert kind == "buttons" and "reply with a number from 1 to 1" in body
+    assert [b for b, _ in buttons] == ["show_list_again", "start_new_chat"]

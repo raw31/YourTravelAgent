@@ -729,7 +729,7 @@ def s37(r: Run):
 def s38(r: Run):
     new = r.do("say", f"{TAJ} 17 Dec {FUT} to 18 Dec {FUT}, 2 adults 1 room")
     r.check(_list_of(new) is not None, "cold message with no room did not lead to a room list")
-    r.do("say", "hi")
+    r.do("say", "start over")
     new = r.do("say", f"{TAJ}")
     r.check(new[-1].text.startswith("📅"), f"cold hotel-only message not asked for dates first: {new[-1].text[:60]!r}")
 

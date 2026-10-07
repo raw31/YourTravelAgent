@@ -1622,7 +1622,9 @@ def _handle_choosing_option(frm: str, session: dict, items: list, button_id=None
                 session["last_activity"] = time.time()
                 session["unproductive_attempts"] = attempts
                 _WA_SESSIONS[frm] = session
-            wa_send(frm, f"Tap a room, or reply with a number from 1 to {len(options)} to pick one.")
+            wa_send_buttons(
+                frm, f"Tap a room from the list, or reply with a number from 1 to {len(options)}.",
+                [("show_list_again", "Show list again"), ("start_new_chat", "Start over")])
             return
         if attempts == 2:
             with _WA_SESSIONS_LOCK:
