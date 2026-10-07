@@ -400,3 +400,76 @@ def test_currency_default_does_not_override_a_real_extracted_currency(monkeypatc
     monkeypatch.setattr("yta.pipeline.extract_llm.extract", lambda *a, **kw: _FakeRes())
     p = extract("", render=False, page_text="dubai hotel 500 aed please")
     assert p.ota_benchmark.currency == "AED"   # the real extracted value, not the INR default
+
+
+# -- provider failover (found by the e2e QA run: a Gemini 504 after a Groq
+#    bad generation aborted the whole extraction) ---------------------------
+
+def _llm_result(provider="gemini"):
+    from yta import extract_llm
+    return extract_llm.LLMExtractionResult(
+        {"hotel.name": "Taj Santacruz"}, {"hotel.name": 0.9}, [], provider, "m")
+
+
+def test_extract_fails_over_when_a_provider_raises_an_arbitrary_error(monkeypatch):
+    from yta import extract_llm, llm
+    from yta.pipeline import extract
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+
+    def fake(context, url="", media=None, provider=None):
+        if provider == "groq":
+            raise llm.GenerationFailed("bad json")
+        return _llm_result(provider)
+    monkeypatch.setattr(extract_llm, "extract", fake)
+    pkt = extract("", render=False, page_text="Taj Santacruz 17-18 Dec")
+    assert pkt.hotel.name == "Taj Santacruz"
+    assert pkt._llm_failed is False
+
+
+def test_a_provider_outage_error_no_longer_aborts_extraction(monkeypatch):
+    from yta import extract_llm, llm
+    from yta.pipeline import extract
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+
+    def fake(context, url="", media=None, provider=None):
+        if provider == "groq":
+            raise RuntimeError("504 DEADLINE_EXCEEDED")        # not an LLMUnavailable/GenerationFailed
+        return _llm_result(provider)
+    monkeypatch.setattr(extract_llm, "extract", fake)
+    pkt = extract("", render=False, page_text="Taj Santacruz 17-18 Dec")
+    assert pkt.hotel.name == "Taj Santacruz"
+
+
+def test_when_every_provider_fails_the_packet_says_so_after_one_more_pass(monkeypatch):
+    from yta import extract_llm, llm
+    from yta.pipeline import extract
+    import yta.pipeline as pl
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq", "gemini"])
+    monkeypatch.setattr(pl.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake(context, url="", media=None, provider=None):
+        calls.append(provider)
+        raise RuntimeError("down")
+    monkeypatch.setattr(extract_llm, "extract", fake)
+    pkt = extract("", render=False, page_text="Taj Santacruz 17-18 Dec")
+    assert pkt._llm_failed is True
+    assert calls == ["groq", "gemini", "groq", "gemini"]       # a second pass over the chain
+
+
+def test_a_transient_failure_that_recovers_on_the_second_pass_is_a_success(monkeypatch):
+    from yta import extract_llm, llm
+    from yta.pipeline import extract
+    import yta.pipeline as pl
+    monkeypatch.setattr(llm, "provider_chain", lambda media=False: ["groq"])
+    monkeypatch.setattr(pl.time, "sleep", lambda s: None)
+    n = {"i": 0}
+
+    def fake(context, url="", media=None, provider=None):
+        n["i"] += 1
+        if n["i"] == 1:
+            raise RuntimeError("429")
+        return _llm_result(provider)
+    monkeypatch.setattr(extract_llm, "extract", fake)
+    pkt = extract("", render=False, page_text="Taj Santacruz 17-18 Dec")
+    assert pkt.hotel.name == "Taj Santacruz" and pkt._llm_failed is False

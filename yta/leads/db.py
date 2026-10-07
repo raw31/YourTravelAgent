@@ -69,8 +69,11 @@ def record_lead(phone: str, status: str, packet, resolution: dict | None,
     # "no_deal" (v6+): a matched rate that wasn't actually cheaper --
     # logged purely for internal analysis (ota_price/price columns
     # already capture everything needed for the gap), never shown to
-    # the customer.
-    assert status in ("confirmed", "declined", "no_deal"), status
+    # the customer. "needs_human" (v7+): a customer asked for the human
+    # escape hatch mid-conversation, before any rate exists yet -- same
+    # queue, so the personal follow-up already promised after a
+    # confirmed deal extends to a stuck customer too.
+    assert status in ("confirmed", "declined", "no_deal", "needs_human"), status
     best = _best_option(resolution)
     ref = "BMS-" + uuid.uuid4().hex[:8].upper()
     occ = packet.stay.occupancy or []

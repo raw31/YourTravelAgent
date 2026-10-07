@@ -168,8 +168,17 @@ def _rows(options) -> list[dict]:
             }
         ids = sorted(str(r.get("id")) for r in rooms if r.get("id"))
         row["room_type_id"] = "+".join(ids) or "?"
-        row["room_name"] = " + ".join(str(r.get("name") or "").strip()
-                                      for r in rooms) or "(unnamed)"
+        names = [str(r.get("name") or "").strip() for r in rooms]
+        # A multi-room search returns each combo with roomInfo repeated once
+        # per room ("King Bed + King Bed"). When every room is the same, that
+        # is just "King Bed" for matching and display -- the doubled string
+        # never matched any single-room name the guest typed, so EVERY
+        # multi-room booking fell through to the manual room list. Different
+        # rooms ("A + B") keep the joined form.
+        if len(names) > 1 and len(set(names)) == 1:
+            row["room_name"] = names[0] or "(unnamed)"
+        else:
+            row["room_name"] = " + ".join(names) or "(unnamed)"
         out.append(row)
     return out
 
@@ -300,6 +309,28 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
         # them -- computed regardless of `use_llm` so a caller can still
         # see it even when LLM tie-breaking itself is disabled.
         ambiguous = len(close) > 1
+        if ambiguous:
+            # The view is stripped off BEFORE scoring (see split_name_and_
+            # view), so two genuinely different rooms -- "Luxury Room City
+            # View Twin Bed" vs "Luxury Room Runway View Twin Bed" -- tie at
+            # 1.000 and used to be flagged ambiguous even when the customer's
+            # own name matched exactly one of them word for word (found
+            # live 2026-10-07: a Cleartrip link with an exact room name got
+            # a pick-a-room list instead of a match). The view is the
+            # tiebreaker that was thrown away: if exactly ONE tied room
+            # matches the requested name verbatim, or the requested view,
+            # it is not ambiguous at all.
+            q_tok = re.sub(r"[^a-z0-9]", "", offer.room_name.lower())
+            narrowed = [b for b in close if any(
+                re.sub(r"[^a-z0-9]", "", v.lower()) == q_tok for v in b.name_variants)]
+            if len(narrowed) != 1 and q_view:
+                narrowed = [b for b in close if b.view and views_match(q_view, b.view)]
+            if len(narrowed) == 1:
+                close = narrowed
+                ambiguous = False
+                notes.append(f"tie between equal-score rooms resolved by "
+                             f"name/view: {narrowed[0].canonical!r}")
+                _log(f"  tie resolved by name/view -> {narrowed[0].canonical!r}")
         if len(close) > 1 and use_llm:
             _log(f"  {len(close)} buckets within {cfg.LLM_TIEBREAK_DELTA} — LLM tie-break")
             pick = _llm_tiebreak(offer, close)
@@ -310,7 +341,7 @@ def map_rooms(options, offer, *, benchmark_price: float | None = None,
             else:
                 notes.append("LLM tie-break inconclusive — took the top score")
         else:
-            chosen = top
+            chosen = close[0] if len(close) == 1 else top
         band = svc.recommend(chosen.score)
     elif scored and scored[0].score >= cfg.THRESHOLD_GOOD and use_llm:
         _log(f"  best {scored[0].score:.3f} below gate but in 'good' band — LLM confirm")

@@ -51,6 +51,98 @@ def wa_send_image(frm: str, image_url: str, caption: str | None = None) -> dict:
     return result
 
 
+def wa_send_buttons(frm: str, body: str, buttons: list) -> dict:
+    """Same logging discipline as wa_send() -- every prior version called
+    whatsapp.send_buttons() directly, with NO status check at all, the one
+    send type in the whole flow that could fail completely silently (a
+    real live gap found 2026-09-30: a customer got no reply to "hey" and
+    nothing at all was logged, because the onboarding-choice send goes
+    through send_buttons and nothing checked its result). This wrapper is
+    the fix -- every send_buttons() call in v7+ goes through here instead,
+    so a failure is never silent again."""
+    from yta import whatsapp
+    result = whatsapp.send_buttons(frm, body, buttons)
+    if result.get("_status_code") != 200:
+        print(f"[wa] SEND FAILED (buttons) to {frm}: status={result.get('_status_code')} "
+              f"error={result.get('error')}", flush=True)
+    return result
+
+
+def wa_send_list(frm: str, body: str, button_text: str, sections: list) -> dict:
+    """Same logging discipline as wa_send() -- a native WhatsApp list
+    message (yta.whatsapp.send_list), the tap-through alternative to a
+    numbered text reply for more than 3 choices (v7+ room picker)."""
+    from yta import whatsapp
+    result = whatsapp.send_list(frm, body, button_text, sections)
+    if result.get("_status_code") != 200:
+        print(f"[wa] SEND FAILED (list) to {frm}: status={result.get('_status_code')} "
+              f"error={result.get('error')}", flush=True)
+    return result
+
+
+def _fit_title(name: str, limit: int = 24) -> str:
+    """Section titles are capped at 24 chars by WhatsApp. Cut at a word
+    boundary with an ellipsis instead of mid-word ("Luxury Room City View
+    Tw"); the full name is repeated in each row's description."""
+    name = (name or "").strip()
+    if len(name) <= limit:
+        return name
+    cut = name[: limit - 1]
+    sp = cut.rfind(" ")
+    if sp >= 12:
+        cut = cut[:sp]
+    return cut.rstrip(" ,-·") + "…"
+
+
+def room_list_sections(groups: list, *, clean_name=None) -> list:
+    """Turns yta.roommap.list_cheapest_rooms()'s groups (each a dict with
+    room_name/options) into yta.whatsapp.send_list()'s
+    [(section_title, [(row_id, row_title, row_description), ...]), ...]
+    shape -- one section per room, one row per meal x refundability
+    variant, `row_id` a flat "opt-N" index matching the same flattened
+    option order _present_option_choices() already builds for the
+    numbered-text fallback, so both UIs pick from identical, order-
+    matched lists. `clean_name` defaults to str() if not given (callers
+    pass wa_shared.clean_room_name to strip shouting caps/stray periods,
+    same as every other room-name display in this module).
+
+    A room name longer than WhatsApp's 24-char section-title cap is
+    shortened at a word boundary for the header, and its FULL name leads
+    every row's description (72-char cap) so the guest never has to guess
+    which room a truncated header meant."""
+    clean = clean_name or (lambda n: n)
+    sections = []
+    n = 0
+    for g in groups:
+        opts = g.get("options") or []
+        if not opts:
+            continue
+        full = (clean(g.get("room_name")) or "Room").strip()
+        title = _fit_title(full)
+        rows = []
+        for opt in opts:
+            n += 1
+            bits = [opt.get("meal_basis") or "Room Only"]
+            if opt.get("refundable") is True:
+                bits.append("Refundable")
+            elif opt.get("refundable") is False:
+                bits.append("Non-refundable")
+            tail = " · ".join(bits)
+            if title != full:
+                room = full
+                room_max = 72 - len(tail) - 3
+                if len(room) > room_max:
+                    room = room[: max(room_max - 1, 1)].rstrip() + "…"
+                desc = f"{room} · {tail}"
+            else:
+                desc = tail
+            ccy = opt.get("currency") or ""
+            price = opt.get("total_price") or 0
+            rows.append((f"opt-{n}", f"{ccy} {price:,.0f}", desc))
+        sections.append((title, rows))
+    return sections
+
+
 def occ_field(r, name, default=None):
     """`stay.occupancy` holds real RoomOccupancy objects on a live packet,
     but plain dicts once something's gone through .to_dict()/JSON — accept
@@ -73,7 +165,12 @@ def occ_repr(occ) -> str:
         if c:
             bit += f" + {c} child{'ren' if c != 1 else ''}"
         parts.append(bit)
-    return "; ".join(parts)
+    if len(parts) == 1:
+        return parts[0]
+    # "2 adults; 2 adults" read like a duplicated line -- say what it is.
+    if len(set(parts)) == 1:
+        return f"{len(parts)} rooms · {parts[0]} each"
+    return f"{len(parts)} rooms · " + " + ".join(parts)
 
 
 def extracted_lines(packet) -> list:
@@ -284,11 +381,25 @@ NATURAL_NOUNS = {
     # ask gets silently read as one room of 4, which can be the wrong
     # room configuration entirely (2 rooms of 2 is a different, often
     # differently-priced search). Real live transcript exposed this.
-    "stay.rooms": "how many rooms, and how many in each",
-    "stay.occupancy": "how many rooms, and how many in each",
+    "stay.rooms": "the number of rooms and guests per room",
+    "stay.occupancy": "the number of rooms and guests per room",
     "requested_offer.room_name": "the room type",
     "ota_benchmark.final_payable": "the total price",
 }
+
+# Quick-reply presets for the single most common real occupancy shapes
+# (v7+) -- offered alongside the ordinary closing question, not instead of
+# it: free text answers anything unusual exactly as before, these just
+# button-ify the majority case ("if a flow can be a button, make it a
+# button"). (button_id, title) -- a tap arrives with `text` already set to
+# the button's own title (see whatsapp.parse_inbound), which is plain
+# enough natural language to feed straight into extract_clarification()
+# exactly as if the customer had typed it -- no separate extraction text
+# needed.
+OCCUPANCY_QUICK_REPLIES = [
+    ("occ_2a1r", "2 adults, 1 room"),
+    ("occ_2a_kids", "2 adults + kids"),
+]
 
 
 def short_date(iso_str):
@@ -318,7 +429,7 @@ def price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct) -> str:
     """Two failed approaches taught the same lesson: don't try to align
     price labels into columns at all. Hand-padded spaces don't align in
     WhatsApp's proportional font; a ```monospace``` block DOES align, but
-    the padding needed to line up "BookMyStay price:" makes the line
+    the padding needed to line up "Pocket Stays price:" makes the line
     wider than a phone screen, so WhatsApp wraps it mid-value ("INR" on
     one line, the number on the next) -- worse than the original
     misalignment. A "was -> now" line has nothing to align and is short
@@ -328,7 +439,7 @@ def price_comparison_lines(ota_ccy, ota_price, ccy, sell, diff, dpct) -> str:
 
 
 def price_line(ccy, sell) -> str:
-    return f"BookMyStay price: *{ccy} {sell:,.2f}*"
+    return f"Pocket Stays price: *{ccy} {sell:,.2f}*"
 
 
 def recap_block(packet) -> str:
@@ -441,7 +552,7 @@ def deal_recap_block(packet, best: dict, *, hotel_name: str | None = None) -> st
     return "\n".join(lines)
 
 
-def deal_message(packet, resolution) -> tuple:
+def deal_message(packet, resolution, compare: bool = True) -> tuple:
     """Returns (text, matched, bookable, savings_line, confirm_line).
     `matched`: a room/rate was actually found at all. `bookable`: there's
     a genuine offer worth confirming -- matched AND (not directly
@@ -479,7 +590,10 @@ def deal_message(packet, resolution) -> tuple:
     flat = float(os.environ.get("WHATSAPP_MARKUP_FLAT", "0") or 0)
     ccy = best.get("currency", "") or ""
     sell = round(best.get("total_price", 0) * (1 + pct / 100) + flat, 2)
-    comparable = bool(ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
+    # `compare=False` (v7): the rate belongs to a DIFFERENT room than the one
+    # the OTA price was for, so any "X% better" / "couldn't beat" claim would
+    # be a comparison between two different rooms.
+    comparable = bool(compare and ota_price and ota_ccy and ota_ccy.upper() == ccy.upper())
     # TripJack's own name for the hotel (from the live Detail/Pricing
     # response, or the earlier hotel-id match against its catalog) --
     # never the OTA/customer's own wording once a live rate exists to

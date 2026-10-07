@@ -340,3 +340,67 @@ def test_map_rooms_still_works_unmodified_after_option_type_additions():
     assert {ro.option_id for ro in r.rate_options} == {"o1", "o2", "o3", "o4"}
     # every returned RateOption now also carries the option_type it came in with
     assert all(ro.option_type == "SRSM" for ro in r.rate_options)
+
+
+# -- exact name with a view that distinguishes otherwise-tied rooms ------
+
+def test_exact_room_name_with_view_is_not_ambiguous_when_view_breaks_the_tie():
+    # Real case (Cleartrip link, 2026-10-07): the view is stripped before
+    # scoring, so "City View" and "Runway View" twins both scored 1.000 and
+    # a verbatim-exact room name still got flagged ambiguous -> a pick-a-
+    # room list instead of a match.
+    opts = [
+        _opt("C1", "Luxury Room City View Twin Bed", "Room Only", True, 30000, "c1"),
+        _opt("C2", "Luxury Room Runway View Twin Bed", "Room Only", True, 28000, "c2"),
+        _opt("C3", "Premier Suite", "Room Only", True, 60000, "c3"),
+    ]
+    r = map_rooms(opts, Offer(room_name="Luxury Room City View Twin Bed",
+                              meal_plan="Room Only", refundable=True), use_llm=False)
+    assert r.matched is True
+    assert r.room_type_id == "C1"
+    assert r.ambiguous is False
+
+
+def test_generic_room_name_with_tied_views_is_still_ambiguous():
+    # No view in the query -> the view can't break the tie, so the original
+    # ambiguity (let the customer pick) must still apply.
+    opts = [
+        _opt("C1", "Luxury Room City View Twin Bed", "Room Only", True, 30000, "c1"),
+        _opt("C2", "Luxury Room Runway View Twin Bed", "Room Only", True, 28000, "c2"),
+    ]
+    r = map_rooms(opts, Offer(room_name="Luxury Room Twin Bed",
+                              meal_plan="Room Only", refundable=True), use_llm=False)
+    assert r.ambiguous is True
+
+
+# -- multi-room combos (found by the e2e QA run) -----------------------------
+
+def _combo(oid, names, price, rid_prefix=None):
+    rid_prefix = rid_prefix or oid
+    return {"optionId": oid, "optionType": "SRSM",
+            "roomInfo": [{"id": f"{rid_prefix}-{n.split()[0]}", "name": n, "adults": 2, "children": 0}
+                         for i, n in enumerate(names)],
+            "mealBasis": "Room Only", "pricing": {"totalPrice": price, "currency": "INR"},
+            "cancellation": {"isRefundable": True}}
+
+
+def test_identical_rooms_in_a_multi_room_combo_read_as_the_single_room_name():
+    from yta.roommap.match import _rows
+    rows = _rows([_combo("o1", ["Luxury Room King Bed", "Luxury Room King Bed"], 47000)])
+    assert rows[0]["room_name"] == "Luxury Room King Bed"
+
+
+def test_different_rooms_in_a_combo_keep_the_joined_name():
+    from yta.roommap.match import _rows
+    rows = _rows([_combo("o1", ["Luxury Room King Bed", "Deluxe Twin"], 47000)])
+    assert rows[0]["room_name"] == "Luxury Room King Bed + Deluxe Twin"
+
+
+def test_a_single_room_name_now_matches_a_two_room_combo():
+    from yta.roommap import map_rooms
+    from yta.schema import Offer
+    opts = [_combo("o1", ["Luxury Room King Bed"] * 2, 47000),
+            _combo("o2", ["Deluxe Twin"] * 2, 40000)]
+    offer = Offer(room_name="Luxury Room King Bed")
+    rm = map_rooms(opts, offer)
+    assert rm.matched and rm.rate_options[0].total_price == 47000

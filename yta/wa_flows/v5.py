@@ -20,19 +20,19 @@ What v5 adds on top:
      the next real submission consumes it.
   10. The two paths ask different things of `check_mandatory()`'s output
      (_effective_missing): "I have a deal" adds `requested_offer.room_name`
-     BACK into what's asked for -- but only when there's SOME room detail
-     to go on (a description) that just didn't resolve to a clean name;
-     when there's neither a room_name NOR a description at all, forcing
-     the question would stall on a field the customer plainly doesn't
-     have, so it falls through to the room-options list instead, same as
-     bypassing the buttons entirely would. "Search a hotel" REMOVES
-     `ota_benchmark.final_payable` from what's asked for -- there's no OTA
-     price to compare against when the whole point is finding one, so
-     requiring it would stall the conversation on a field that doesn't
-     apply. A customer who ignores the buttons entirely (pastes a link out
-     of habit) gets neither override -- exactly today's v4 behavior,
-     schema.py's own mandatory set is already enough for both a full
-     single-room deal and a no-room submission on its own.
+     BACK into what's asked for -- STRICTLY and unconditionally, per
+     explicit instruction (tapping "I have a deal" commits to that flow,
+     and a specific room is the whole point of a deal comparison; an
+     earlier version only forced the question when a description hint
+     existed and fell through to a hotel-based search otherwise -- that
+     was reversed on purpose, see _effective_missing's own docstring).
+     "Search a hotel" REMOVES `ota_benchmark.final_payable` from what's
+     asked for -- there's no OTA price to compare against when the whole
+     point is finding one, so requiring it would stall the conversation on
+     a field that doesn't apply. A customer who ignores the buttons
+     entirely (pastes a link out of habit) gets neither override -- exactly
+     today's v4 behavior, schema.py's own mandatory set is already enough
+     for both a full single-room deal and a no-room submission on its own.
   11. When _resolve() comes back with `room_options` (no room was ever
      requested) instead of `room_map`, _present_deal hands off to
      _present_option_choices -- up to 5 DISTINCT rooms (the cheapest 5,

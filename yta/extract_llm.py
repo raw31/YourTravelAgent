@@ -132,8 +132,11 @@ RULES
   addresses with ", ". Then also fill hotel.city and hotel.country from it.
 - Money: numbers only (no currency symbols, no thousands separators).
   final_payable is the final all-in amount, not a per-night or pre-tax figure.
-- Dates as YYYY-MM-DD. If the page shows only a weekday/day-month, combine
-  with the year in context; if you cannot be sure of the year, use null.
+- Dates as YYYY-MM-DD, using a year that is actually PRINTED in the content
+  (page, screenshot or URL). NEVER infer, assume or guess a year. If the
+  stay dates show a day and month but NO year anywhere (e.g. "17 Dec - 18
+  Dec"), return them as MM-DD ("12-17") for both stay.check_in and
+  stay.check_out -- the system will ask the guest for the year.
 - occupancy: for a multi-room booking give the per-room split exactly as
   shown ("Room 1: 2 adults", "Room 2: 2 adults, 1 child age 3"), including
   from a collapsed "Guest information" panel or the CAPTURED API DATA block.
@@ -204,9 +207,9 @@ FIELD_LABELS = {
 }
 
 
-def extract_clarification(missing_paths: list, reply_text: str,
-                           media: list | None = None,
-                           provider: str | None = None) -> tuple:
+def extract_clarification_ex(missing_paths: list, reply_text: str,
+                              media: list | None = None,
+                              provider: str | None = None) -> tuple:
     """A small, targeted follow-up call — NOT the full page extraction.
     Given exactly the mandatory fields still missing and a customer's
     reply so far (text and/or a photo — see the caller for why the TEXT
@@ -218,7 +221,12 @@ def extract_clarification(missing_paths: list, reply_text: str,
     it out — without vision here that reply was silently dropped and the
     bot just asked the same question again forever.
 
-    Returns (fields: dict, clarify: str | None). `fields` never guesses —
+    Returns (fields: dict, clarify: str | None, ok: bool). `ok` is False
+    only when EVERY provider failed (outage / rate limit / invalid output) --
+    distinct from a reply that genuinely answered nothing, so a caller can
+    apologise and let the guest retry instead of counting it as a wrong
+    answer. `extract_clarification()` below keeps the old 2-tuple shape.
+    `fields` never guesses —
     a field stays absent rather than invented. `clarify` is a short,
     SPECIFIC follow-up question the model raises only when a reply was
     partial/ambiguous for one of these fields (a date with no year, an
@@ -227,7 +235,7 @@ def extract_clarification(missing_paths: list, reply_text: str,
     which reads as the bot having ignored what was already said."""
     wanted = [p for p in missing_paths if p in FIELD_QUESTIONS]
     if not wanted or not ((reply_text or "").strip() or media):
-        return {}, None
+        return {}, None, True
     # ota_benchmark.currency is never itself mandatory (see schema.py), so
     # it never appears in `wanted` on its own — but a reply that answers
     # final_payable is almost always a price screenshot, which shows its
@@ -275,24 +283,28 @@ def extract_clarification(missing_paths: list, reply_text: str,
     user = f"Customer's reply so far (may span more than one message): {reply_text!r}"
     if media:
         user += "\n\nA photo from the customer is attached below — read it too."
+    # Try every provider in turn: Groq's JSON mode intermittently rejects a
+    # generation and Gemini has 504'd, and a single swallowed failure used to
+    # read as "the guest answered nothing". gpt-oss-120b (Groq's default text
+    # model) spends part of its token budget on internal reasoning before the
+    # JSON, so 700 is comfortably above what this small a task needs.
     try:
-        # gpt-oss-120b (Groq's default text model) spends part of its token
-        # budget on internal reasoning before the actual JSON — a tight
-        # budget here truncates before valid JSON is produced and Groq's
-        # json_object mode rejects it outright. 700 is comfortably above
-        # what this small a task needs even with that overhead. `media`
-        # forces the vision provider chain the same way the main
-        # extraction does (yta.llm.complete picks it automatically).
-        raw, _, _ = llm.complete(system, user, max_tokens=700, media=media, provider=provider)
-    except Exception:
-        return {}, None
-    raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return {}, None
-    if not isinstance(data, dict):
-        return {}, None
+        chain = [provider] if provider else llm.provider_chain(media=bool(media))
+    except Exception:  # noqa: BLE001 -- no provider configured at all
+        return {}, None, False
+    data = None
+    for prov in chain:
+        try:
+            raw, _, _ = llm.complete(system, user, max_tokens=700, media=media, provider=prov)
+            raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
+            parsed = json.loads(raw)
+        except Exception:  # noqa: BLE001 -- fail over to the next provider
+            continue
+        if isinstance(parsed, dict):
+            data = parsed
+            break
+    if data is None:
+        return {}, None, False
     # The prompt asks for flat dotted keys, but vision models sometimes nest
     # by the dot anyway (e.g. {"ota_benchmark": {"final_payable": 31683}}
     # instead of {"ota_benchmark.final_payable": 31683}) despite being told
@@ -309,6 +321,14 @@ def extract_clarification(missing_paths: list, reply_text: str,
     fields = {p: v for p in wanted + bonus if (v := _get(data, p)) is not None}
     clarify = data.get("clarify")
     clarify = clarify.strip() if isinstance(clarify, str) and clarify.strip() else None
+    return fields, clarify, True
+
+
+def extract_clarification(missing_paths: list, reply_text: str,
+                           media: list | None = None,
+                           provider: str | None = None) -> tuple:
+    """Back-compat 2-tuple wrapper (older WhatsApp flows): (fields, clarify)."""
+    fields, clarify, _ok = extract_clarification_ex(missing_paths, reply_text, media, provider)
     return fields, clarify
 
 

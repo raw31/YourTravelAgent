@@ -66,11 +66,13 @@ def parse_inbound(payload: dict) -> list[dict]:
     """Meta's webhook POST body -> a flat list of
     {from, type, text, media_id, mime_type, button_id} — one per message.
     `type` is "text", "image"/"document" (media messages, where `media_id`
-    needs `download_media()`), or "button_reply" (a tap on a
-    send_buttons() message — `button_id` is the id we chose when sending
-    it, `text` carries the button's visible title so a caller can also
-    match on what the customer would have typed instead); anything else
-    (status updates, reactions, etc.) is skipped."""
+    needs `download_media()`), or "button_reply" (a tap on either a
+    send_buttons() message OR a send_list() row — both normalize to the
+    same shape, since a caller never needs to know which UI produced the
+    tap: `button_id` is the id we chose when sending it (a button's own id,
+    or a list row's id), `text` carries the visible title so a caller can
+    also match on what the customer would have typed instead); anything
+    else (status updates, reactions, etc.) is skipped."""
     out = []
     for entry in payload.get("entry") or []:
         for change in entry.get("changes") or []:
@@ -89,8 +91,21 @@ def parse_inbound(payload: dict) -> list[dict]:
                     item["text"] = media.get("caption")  # a link can ride along as a caption
                 elif mtype == "interactive":
                     interactive = m.get("interactive") or {}
-                    if interactive.get("type") != "button_reply":
-                        continue                          # list replies etc. -- not sent yet
+                    itype = interactive.get("type")
+                    if itype == "list_reply":
+                        # A tap on a send_list() row -- normalized into the
+                        # exact same {"type": "button_reply", ...} shape a
+                        # button tap produces, so callers (session state
+                        # handling in wa_flows/*) need zero new branching
+                        # to accept either UI.
+                        lr = interactive.get("list_reply") or {}
+                        item["type"] = "button_reply"
+                        item["button_id"] = lr.get("id")
+                        item["text"] = lr.get("title")
+                        out.append(item)
+                        continue
+                    if itype != "button_reply":
+                        continue                          # anything else -- not sent yet
                     br = interactive.get("button_reply") or {}
                     item["type"] = "button_reply"
                     item["button_id"] = br.get("id")
@@ -177,7 +192,17 @@ def send_buttons(to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
     pass more). `buttons` is [(id, title), ...] — `id` comes straight back
     on the customer's tap (parse_inbound()'s "button_id"), `title` is what
     they see. A customer can still just type instead of tapping — this is
-    an additional affordance, not a replacement for reading plain text."""
+    an additional affordance, not a replacement for reading plain text.
+
+    Meta caps a button title at 20 characters -- and rejects the ENTIRE
+    message (all buttons, the whole body text) if even one title is over,
+    not just that button (confirmed live 2026-09-30: a 23-char title on
+    v7's onboarding choice silently killed every reply to "hey" for real
+    customers, with nothing logged until wa_send_buttons's status check
+    was added). Truncated here, same defensive discipline send_list()
+    already uses for ITS length caps, so a copy change can never silently
+    kill a whole message again -- callers should still write titles that
+    fit without truncation, this is a safety net, not a design license."""
     import requests
     cfg = _cfg()
     r = requests.post(
@@ -188,9 +213,60 @@ def send_buttons(to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
                   "type": "button",
                   "body": {"text": body},
                   "action": {"buttons": [
-                      {"type": "reply", "reply": {"id": bid, "title": title}}
+                      {"type": "reply", "reply": {"id": bid, "title": (title or "")[:20]}}
                       for bid, title in buttons[:3]
                   ]},
+              }},
+        timeout=15,
+    )
+    try:
+        out = r.json()
+    except ValueError:
+        out = {"raw": r.text}
+    out["_status_code"] = r.status_code
+    return out
+
+
+def send_list(to: str, body: str, button_text: str, sections: list[tuple]) -> dict:
+    """Interactive LIST message — up to 10 rows total across up to 10
+    sections (Meta's own limits; both are truncated here so a caller never
+    has to remember them). `sections` is
+    [(section_title, [(row_id, row_title, row_description), ...]), ...] --
+    `row_id` comes straight back on the customer's tap
+    (parse_inbound()'s "button_id", same as a button reply -- see
+    parse_inbound's list_reply handling), `row_title`/`row_description`
+    are what they see. Meta caps row_title at 24 chars, row_description at
+    72, section_title at 24, and button_text at 20 -- truncated here rather
+    than left for the API to silently reject. Recommended over
+    send_buttons() for more than 3 choices (WhatsApp's own guidance) --
+    a customer can still just type instead of tapping, same as buttons."""
+    import requests
+    cfg = _cfg()
+    rows_total = 0
+    api_sections = []
+    for title, rows in sections:
+        if rows_total >= 10:
+            break
+        take = rows[: 10 - rows_total]
+        rows_total += len(take)
+        api_sections.append({
+            "title": (title or "")[:24],
+            "rows": [
+                {"id": rid, "title": (rtitle or "")[:24],
+                 **({"description": rdesc[:72]} if rdesc else {})}
+                for rid, rtitle, rdesc in take
+            ],
+        })
+        if len(api_sections) >= 10:
+            break
+    r = requests.post(
+        f"{_GRAPH}/{cfg['api_version']}/{cfg['phone_number_id']}/messages",
+        headers={"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json"},
+        json={"messaging_product": "whatsapp", "to": to, "type": "interactive",
+              "interactive": {
+                  "type": "list",
+                  "body": {"text": body},
+                  "action": {"button": (button_text or "Choose")[:20], "sections": api_sections},
               }},
         timeout=15,
     )

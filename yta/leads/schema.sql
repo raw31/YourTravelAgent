@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS leads (
     booking_ref       TEXT PRIMARY KEY,   -- "BMS-XXXXXXXX", shown to the customer
     phone             TEXT NOT NULL,
     status            TEXT NOT NULL,      -- 'confirmed' | 'declined' | 'no_deal' (matched but
-                                           -- not cheaper -- internal analytics only, v6+)
+                                           -- not cheaper -- internal analytics only, v6+) |
+                                           -- 'needs_human' (customer asked for a human
+                                           -- mid-conversation, before any rate yet -- v7+)
     created_at        TEXT NOT NULL,      -- ISO timestamp, UTC
 
     hotel_name        TEXT,
@@ -19,7 +21,7 @@ CREATE TABLE IF NOT EXISTS leads (
     refundable        INTEGER,            -- 0/1/NULL
     free_cancel_until TEXT,
     currency          TEXT,
-    price             REAL,               -- BookMyStay's confirmed sell price
+    price             REAL,               -- Pocket Stays' confirmed sell price
     ota_price         REAL,               -- OTA's shown price, for reference
     occupancy_json    TEXT,               -- raw occupancy array, as JSON
     referred_by       TEXT,               -- a prior booking_ref, if this lead mentioned one

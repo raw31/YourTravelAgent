@@ -1,6 +1,7 @@
-"""yta/whatsapp.py -- the additive interactive-message pieces built for
-v2 (send_buttons, and parse_inbound()'s button_reply support). No network
--- requests.post is mocked."""
+"""yta/whatsapp.py -- the additive interactive-message pieces: send_buttons
++ parse_inbound()'s button_reply support (v2), and send_list +
+parse_inbound()'s list_reply support (v7). No network -- requests.post is
+mocked."""
 import pytest
 
 from yta import whatsapp
@@ -68,6 +69,21 @@ def test_send_buttons_never_sends_more_than_three(monkeypatch):
     assert len(captured["json"]["interactive"]["action"]["buttons"]) == 3
 
 
+def test_send_buttons_truncates_titles_over_twenty_chars(monkeypatch):
+    # Regression: Meta rejects the WHOLE message (every button, the body
+    # text, everything) if even one title exceeds 20 chars -- confirmed
+    # live 2026-09-30, a 23-char onboarding button title silently killed
+    # every reply to "hey" for real customers. Truncating here is the
+    # safety net so a copy change can never do that again.
+    captured = {}
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])
+    whatsapp.send_buttons("919999999999", "Pick one",
+                           [("a", "I already picked a room")])
+    title = captured["json"]["interactive"]["action"]["buttons"][0]["reply"]["title"]
+    assert len(title) <= 20
+    assert title == "I already picked a r"
+
+
 def test_parse_inbound_extracts_button_reply():
     payload = {"entry": [{"changes": [{"value": {"messages": [{
         "from": "919999999999",
@@ -82,13 +98,68 @@ def test_parse_inbound_extracts_button_reply():
     assert item["text"] == "Yes, book this"
 
 
-def test_parse_inbound_skips_non_button_interactive():
+def test_parse_inbound_normalizes_list_reply_like_a_button_reply():
     payload = {"entry": [{"changes": [{"value": {"messages": [{
         "from": "919999999999",
         "type": "interactive",
-        "interactive": {"type": "list_reply", "list_reply": {"id": "x", "title": "y"}},
+        "interactive": {"type": "list_reply", "list_reply": {"id": "opt-2", "title": "INR 25,000"}},
+    }]}}]}]}
+    items = whatsapp.parse_inbound(payload)
+    assert len(items) == 1
+    item = items[0]
+    assert item["type"] == "button_reply"          # same shape a button tap produces
+    assert item["button_id"] == "opt-2"
+    assert item["text"] == "INR 25,000"
+
+
+def test_parse_inbound_skips_other_interactive_types():
+    payload = {"entry": [{"changes": [{"value": {"messages": [{
+        "from": "919999999999",
+        "type": "interactive",
+        "interactive": {"type": "nfm_reply", "nfm_reply": {}},
     }]}}]}]}
     assert whatsapp.parse_inbound(payload) == []
+
+
+def test_send_list_posts_interactive_list_payload(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])
+    sections = [
+        ("Deluxe Villa", [("opt-1", "INR 20,000", "Room Only"), ("opt-2", "INR 21,000", "Breakfast")]),
+        ("Premier Villa", [("opt-3", "INR 25,000", "Room Only · Refundable")]),
+    ]
+    out = whatsapp.send_list("919999999999", "Pick a room", "Choose a room", sections)
+    assert out["_status_code"] == 200
+    body = captured["json"]
+    assert body["type"] == "interactive"
+    assert body["interactive"]["type"] == "list"
+    assert body["interactive"]["body"]["text"] == "Pick a room"
+    assert body["interactive"]["action"]["button"] == "Choose a room"
+    api_sections = body["interactive"]["action"]["sections"]
+    assert [s["title"] for s in api_sections] == ["Deluxe Villa", "Premier Villa"]
+    assert len(api_sections[0]["rows"]) == 2 and len(api_sections[1]["rows"]) == 1
+    assert api_sections[0]["rows"][0] == {"id": "opt-1", "title": "INR 20,000", "description": "Room Only"}
+
+
+def test_send_list_caps_at_ten_rows_total(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])
+    sections = [(f"Room {i}", [(f"opt-{i}", f"INR {i}00", "")]) for i in range(15)]
+    whatsapp.send_list("919999999999", "Pick a room", "Choose", sections)
+    total_rows = sum(len(s["rows"]) for s in captured["json"]["interactive"]["action"]["sections"])
+    assert total_rows == 10
+
+
+def test_send_list_truncates_long_labels(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (captured.update(json=kw["json"]), _FakeResponse(200))[1])
+    long_title = "A" * 40
+    whatsapp.send_list("919999999999", "Pick", "X" * 30, [("S" * 40, [("id1", long_title, None)])])
+    body = captured["json"]["interactive"]
+    assert len(body["action"]["button"]) <= 20
+    assert len(body["action"]["sections"][0]["title"]) <= 24
+    assert len(body["action"]["sections"][0]["rows"][0]["title"]) <= 24
+    assert "description" not in body["action"]["sections"][0]["rows"][0]   # falsy description omitted
 
 
 def test_parse_inbound_still_handles_plain_text_and_media():

@@ -852,7 +852,24 @@ def _resolve(packet) -> dict:
                                 det.options, packet.requested_offer,
                                 benchmark_price=packet.ota_benchmark.final_payable,
                                 policy=packet.matching_policy, log=packet.log)
-                            if rm.matched and rm.ambiguous:
+                            top3 = [(b.canonical, b.score) for b in rm.ranked_buckets[:3]]
+                            print(f"[wa] roommap: asked={packet.requested_offer.room_name!r} "
+                                  f"matched={rm.matched} ambiguous={rm.ambiguous} "
+                                  f"band={rm.band} top3={top3} notes={rm.notes}", flush=True)
+                            if not rm.matched:
+                                # The hotel HAS live rates but the requested room
+                                # name didn't map to any of them -- used to be a
+                                # dead end ("couldn't find a better rate"). Show
+                                # the rooms instead and let the customer pick.
+                                from yta.roommap import list_cheapest_rooms
+                                rgr = list_cheapest_rooms(det.options)
+                                d["room_options"] = rgr.to_dict()
+                                d["room_options"]["no_match"] = True
+                                packet.log(
+                                    f"room name {packet.requested_offer.room_name!r} matched "
+                                    f"none of {len(det.options)} option(s) "
+                                    f"({'; '.join(rm.notes)}) — listing rooms instead of a dead end")
+                            elif rm.ambiguous:
                                 # The OTA room name scored close against
                                 # SEVERAL real, differently-priced rooms at
                                 # this hotel (e.g. "Luxury room" matching one

@@ -219,3 +219,18 @@ def test_no_room_name_path_logs_a_summary_line(monkeypatch):
     _resolve(pkt)
     assert any("no requested room name" in l["msg"] and "2 room" in l["msg"]
                for l in pkt.run_log)
+
+
+def test_room_name_that_matches_nothing_falls_back_to_the_room_list(monkeypatch):
+    # Live 2026-10-07: a screenshot's room name mapped to none of the
+    # hotel's rooms -> the customer hit a "couldn't find a better rate" dead
+    # end even though the hotel had live rates. Now it lists the rooms.
+    opts = [
+        _opt("R1", "Budget Room", "Room Only", False, 10000, "b1"),
+        _opt("R2", "Premier Suite", "Room Only", False, 30000, "p1"),
+    ]
+    _wire_common_mocks(monkeypatch, opts)
+    d = _resolve(_packet(room_name="Imperial Club Ocean Terrace Zebra"))
+    assert d["room_options"]["no_match"] is True
+    assert "room_map" not in d
+    assert len(d["room_options"]["groups"]) == 2

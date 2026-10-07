@@ -17,6 +17,7 @@ llm_context / _json_digest path).
 from __future__ import annotations
 
 import json
+import time
 import os
 import re
 
@@ -232,41 +233,56 @@ def extract(url: str = "", *, render: bool = True, page_text: str | None = None,
             chain = []
 
     used = []
-    for prov in chain:
-        pkt.log(f"asking {prov} to extract the data points …")
-        try:
-            res = extract_llm.extract(context, url=url, media=media, provider=prov)
-        except llm.SizeLimitError:
-            pkt.warnings.append(
-                f"{prov}: request over its token/min limit — trying next provider")
-            pkt.log(f"{prov} rejected the request (too large for its free tier) "
-                    f"— switching provider")
-            continue
-        except llm.GenerationFailed as e:
-            pkt.warnings.append(f"{prov}: bad generation ({e}) — trying next provider")
-            pkt.log(f"{prov} returned an invalid generation — switching provider")
-            continue
-        except (llm.LLMUnavailable, json.JSONDecodeError) as e:
-            pkt.warnings.append(f"{prov}: {type(e).__name__} — trying next provider")
-            pkt.log(f"{prov} failed ({type(e).__name__}) — switching provider")
-            continue
+    for _pass in range(2):
+        for prov in chain:
+            pkt.log(f"asking {prov} to extract the data points …")
+            try:
+                res = extract_llm.extract(context, url=url, media=media, provider=prov)
+            except llm.SizeLimitError:
+                pkt.warnings.append(
+                    f"{prov}: request over its token/min limit — trying next provider")
+                pkt.log(f"{prov} rejected the request (too large for its free tier) "
+                        f"— switching provider")
+                continue
+            except llm.GenerationFailed as e:
+                pkt.warnings.append(f"{prov}: bad generation ({e}) — trying next provider")
+                pkt.log(f"{prov} returned an invalid generation — switching provider")
+                continue
+            except (llm.LLMUnavailable, json.JSONDecodeError) as e:
+                pkt.warnings.append(f"{prov}: {type(e).__name__} — trying next provider")
+                pkt.log(f"{prov} failed ({type(e).__name__}) — switching provider")
+                continue
+            except Exception as e:  # noqa: BLE001 -- a provider outage/timeout (e.g. Gemini 504, a
+                # network blip) must fail over to the next provider, never abort
+                # the whole extraction
+                pkt.warnings.append(f"{prov}: {type(e).__name__} — trying next provider")
+                pkt.log(f"{prov} failed ({type(e).__name__}: {str(e)[:120]}) — switching provider")
+                print(f"[extract] {prov} failed: {type(e).__name__}: {str(e)[:160]}", flush=True)
+                continue
 
-        _apply(pkt, res, fill_only=bool(used), protect=protect)
-        used.append(f"{res.provider}:{res.model}")
-        pkt.derive_stay()
-        pkt.log(f"{res.provider} returned: {_found_summary(pkt)}"
-                + ("  (gap-fill pass)" if len(used) > 1 else ""))
-        if res.contradictions:
-            pkt.log(f"{res.provider} flags a URL/page mismatch: {res.contradictions}")
-        if not pkt.check_mandatory():
-            pkt.log("all mandatory fields present")
+            _apply(pkt, res, fill_only=bool(used), protect=protect)
+            used.append(f"{res.provider}:{res.model}")
+            pkt.derive_stay()
+            pkt.log(f"{res.provider} returned: {_found_summary(pkt)}"
+                    + ("  (gap-fill pass)" if len(used) > 1 else ""))
+            if res.contradictions:
+                pkt.log(f"{res.provider} flags a URL/page mismatch: {res.contradictions}")
+            if not pkt.check_mandatory():
+                pkt.log("all mandatory fields present")
+                break
+            if prov != chain[-1]:
+                pkt.warnings.append(
+                    f"{res.provider} missing {', '.join(pkt.missing_mandatory)} — "
+                    f"asking the next provider to fill the gaps")
+                pkt.log(f"still missing: {', '.join(pkt.missing_mandatory)} "
+                        f"— asking the next provider to fill the gaps")
+        if used or not chain:
             break
-        if prov != chain[-1]:
-            pkt.warnings.append(
-                f"{res.provider} missing {', '.join(pkt.missing_mandatory)} — "
-                f"asking the next provider to fill the gaps")
-            pkt.log(f"still missing: {', '.join(pkt.missing_mandatory)} "
-                    f"— asking the next provider to fill the gaps")
+        pkt.log("every provider failed — one more pass over the chain")
+        time.sleep(1.5)
+    # Distinguishes "the LLM was down" from "the page genuinely had nothing": a
+    # caller can retry/apologise instead of asking the guest for fields.
+    pkt._llm_failed = bool(chain) and not used
 
     if used:
         pkt.source.extraction_method = f"{content_src}+llm:{'+'.join(used)}"
@@ -373,6 +389,15 @@ def _apply(pkt: BookingIntent, res, fill_only: bool = False, protect: set = froz
                 pkt.note("stay.occupancy", _occ_repr(pkt.stay.occupancy),
                          LLM, conf, f"url+page ({res.provider})")
         else:
+            if path in ("stay.check_in", "stay.check_out") and isinstance(val, str) \
+                    and re.match(r"^\d{1,2}-\d{1,2}$", val.strip()):
+                # Month-day only: the source shows no year. Never guess one --
+                # remembered on the packet so the chat flow can ASK the guest.
+                mm, dd = (int(x) for x in val.strip().split("-"))
+                ym = dict(getattr(pkt, "_year_missing", None) or {})
+                ym[path.split(".")[1]] = (mm, dd)
+                pkt._year_missing = ym
+                continue
             if (fill_only or path in _URL_WINS or path in protect) and _is_set(pkt, path):
                 continue
             pkt.add(path, val, LLM, conf, f"url+page ({res.provider})")
