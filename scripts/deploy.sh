@@ -31,6 +31,15 @@ echo "==> Pruning any stale build cache from a previous failed attempt..."
 # the next attempt just inherited the same full disk.
 $SSH 'docker builder prune -af' || true
 
+echo "==> Archiving the running container's logs (a deploy removes the container, and its logs with it)..."
+# Conversations (YTA_LOG_MESSAGES) and LLM/key events live only in the docker logs;
+# keep a dated copy on the data volume, and drop copies older than 30 days.
+$SSH '
+  mkdir -p /home/ubuntu/data/log-archive
+  docker logs --timestamps bookmystay > /home/ubuntu/data/log-archive/bookmystay-$(date -u +%Y%m%d-%H%M%S).log 2>&1 || true
+  find /home/ubuntu/data/log-archive -name "bookmystay-*.log" -mtime +30 -delete 2>/dev/null || true
+'
+
 echo "==> Removing the old image (no room to keep it alongside a new build)..."
 $SSH '
   docker stop bookmystay 2>/dev/null || true

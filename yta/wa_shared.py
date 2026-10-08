@@ -24,6 +24,20 @@ import os
 import random
 
 
+def log_msg(direction: str, phone: str, text: str = "", **fields) -> None:
+    """Conversation record in the container log (owner request 2026-10-08, "abhi ke
+    liye"): what the guest sent (IN) and what the bot replied (OUT), one line each,
+    so a failed conversation can be reconstructed. The phone number is masked to its
+    last 4 digits. Switch off with YTA_LOG_MESSAGES=0. Note: docker logs are wiped by
+    a deploy (scripts/deploy.sh archives them first) and hold customers' own words."""
+    if os.environ.get("YTA_LOG_MESSAGES", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    who = "***" + str(phone or "")[-4:]
+    flat = " ".join(str(text or "").split())
+    extra = " ".join(f"{k}={v}" for k, v in fields.items() if v not in (None, "", []))
+    print(f"[wa-msg] {direction:3} {who} {extra} text={flat[:600]!r}".replace("  ", " "), flush=True)
+
+
 def wa_send(frm: str, text: str) -> dict:
     """Every outbound WhatsApp send goes through here — logs the actual
     result. A bare whatsapp.send_text() call can fail silently (expired
@@ -32,6 +46,7 @@ def wa_send(frm: str, text: str) -> dict:
     one and only place that matters, so fix it once here rather than
     re-checking the result at every call site."""
     from yta import whatsapp
+    log_msg("OUT", frm, text, kind="text")
     result = whatsapp.send_text(frm, text)
     if result.get("_status_code") != 200:
         print(f"[wa] SEND FAILED to {frm}: status={result.get('_status_code')} "
@@ -44,6 +59,7 @@ def wa_send_image(frm: str, image_url: str, caption: str | None = None) -> dict:
     sent as its own message right when the hotel is confidently
     identified (see yta.hoteldb.resolver.Candidate.cover_image)."""
     from yta import whatsapp
+    log_msg("OUT", frm, caption or "", kind="image", url=image_url)
     result = whatsapp.send_image(frm, image_url, caption=caption)
     if result.get("_status_code") != 200:
         print(f"[wa] SEND FAILED (image) to {frm}: status={result.get('_status_code')} "
@@ -61,6 +77,7 @@ def wa_send_buttons(frm: str, body: str, buttons: list) -> dict:
     the fix -- every send_buttons() call in v7+ goes through here instead,
     so a failure is never silent again."""
     from yta import whatsapp
+    log_msg("OUT", frm, body, kind="buttons", buttons=",".join(b[0] for b in buttons))
     result = whatsapp.send_buttons(frm, body, buttons)
     if result.get("_status_code") != 200:
         print(f"[wa] SEND FAILED (buttons) to {frm}: status={result.get('_status_code')} "
@@ -73,6 +90,7 @@ def wa_send_list(frm: str, body: str, button_text: str, sections: list) -> dict:
     message (yta.whatsapp.send_list), the tap-through alternative to a
     numbered text reply for more than 3 choices (v7+ room picker)."""
     from yta import whatsapp
+    log_msg("OUT", frm, body, kind="list", rows=sum(len(r) for _, r in sections))
     result = whatsapp.send_list(frm, body, button_text, sections)
     if result.get("_status_code") != 200:
         print(f"[wa] SEND FAILED (list) to {frm}: status={result.get('_status_code')} "

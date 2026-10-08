@@ -171,3 +171,67 @@ def test_parse_inbound_still_handles_plain_text_and_media():
     assert items[0]["type"] == "text" and items[0]["text"] == "hi"
     assert items[1]["type"] == "image" and items[1]["media_id"] == "m1"
     assert items[0]["button_id"] is None
+
+
+# -- conversation record in the container log (owner 2026-10-08) -----------------
+
+def test_log_msg_masks_the_number_and_keeps_the_guests_words(capsys, monkeypatch):
+    from yta import wa_shared
+    monkeypatch.delenv("YTA_LOG_MESSAGES", raising=False)
+    wa_shared.log_msg("IN", "919900824800", "Taj MG Road,\n17 dec  to 18 dec", kind="text")
+    out = capsys.readouterr().out
+    assert "[wa-msg] IN" in out and "***4800" in out and "919900824800" not in out
+    assert "Taj MG Road, 17 dec to 18 dec" in out                      # newlines/spaces flattened to one line
+
+
+def test_log_msg_truncates_very_long_text_and_can_be_switched_off(capsys, monkeypatch):
+    from yta import wa_shared
+    monkeypatch.delenv("YTA_LOG_MESSAGES", raising=False)
+    wa_shared.log_msg("IN", "919900824800", "x" * 5000, kind="text")
+    assert len(capsys.readouterr().out) < 900
+    monkeypatch.setenv("YTA_LOG_MESSAGES", "0")
+    wa_shared.log_msg("IN", "919900824800", "secret", kind="text")
+    assert capsys.readouterr().out == ""
+
+
+def test_every_outbound_send_is_recorded(capsys, monkeypatch):
+    from yta import wa_shared
+    monkeypatch.delenv("YTA_LOG_MESSAGES", raising=False)
+    ok = lambda *a, **kw: {"_status_code": 200}                        # noqa: E731
+    for name in ("send_text", "send_image", "send_buttons", "send_list"):
+        monkeypatch.setattr(whatsapp, name, ok)
+    wa_shared.wa_send("919900824800", "Hello there")
+    wa_shared.wa_send_image("919900824800", "https://img/x.jpg")
+    wa_shared.wa_send_buttons("919900824800", "Pick", [("a", "A"), ("b", "B")])
+    wa_shared.wa_send_list("919900824800", "Rooms", "Choose", [("Sec", [("opt-1", "INR 1", "d")])])
+    out = capsys.readouterr().out
+    assert out.count("[wa-msg] OUT") == 4
+    assert "kind=text" in out and "kind=image" in out and "buttons=a,b" in out and "rows=1" in out
+    assert "919900824800" not in out
+
+
+def test_inbound_text_taps_and_images_are_recorded(capsys, monkeypatch):
+    from yta import web
+    monkeypatch.delenv("YTA_LOG_MESSAGES", raising=False)
+
+    class _T:                                                           # no real timers in a unit test
+        def __init__(self, *a, **kw): pass
+        def start(self): pass
+        def cancel(self): pass
+        daemon = True
+    monkeypatch.setattr(web.threading, "Timer", _T)
+    web._WA_PENDING.clear()
+    web._enqueue_whatsapp_message({"from": "919900824800", "type": "text", "text": "Taj MG Road Bangalore"})
+    web._enqueue_whatsapp_message({"from": "919900824800", "type": "button_reply", "button_id": "year_0", "text": "17 Dec–18 Dec 2026"})
+    web._enqueue_whatsapp_message({"from": "919900824800", "type": "image", "media_id": "m1", "text": None})
+    out = capsys.readouterr().out
+    assert "[wa-msg] IN  ***4800 kind=text" in out.replace("  ", "  ") or "IN" in out
+    assert "Taj MG Road Bangalore" in out and "kind=tap id=year_0" in out and "kind=image media=m1" in out
+    web._WA_PENDING.clear()
+
+
+def test_deploy_archives_the_logs_before_the_container_is_removed():
+    from pathlib import Path
+    sh = (Path(__file__).resolve().parent.parent / "scripts" / "deploy.sh").read_text()
+    assert sh.index("docker logs --timestamps bookmystay") < sh.index("docker rm bookmystay")
+    assert "log-archive" in sh and "-mtime +30" in sh

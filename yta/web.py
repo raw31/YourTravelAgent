@@ -125,6 +125,13 @@ def _enqueue_whatsapp_message(msg: dict) -> None:
     frm = msg.get("from")
     if not frm:
         return
+    from yta.wa_shared import log_msg
+    if msg.get("type") == "button_reply":
+        log_msg("IN", frm, msg.get("text"), kind="tap", id=msg.get("button_id"))
+    elif msg.get("type") in ("image", "document"):
+        log_msg("IN", frm, msg.get("text"), kind=msg.get("type"), media=msg.get("media_id"))
+    else:
+        log_msg("IN", frm, msg.get("text"), kind="text")
     with _WA_PENDING_LOCK:
         entry = _WA_PENDING.setdefault(frm, {"items": [], "timer": None})
         entry["items"].append(msg)
