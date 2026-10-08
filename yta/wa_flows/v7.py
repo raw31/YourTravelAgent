@@ -886,6 +886,18 @@ def _present_deal(frm: str, packet, ack: bool = True) -> None:
     if md and len(_year_candidates(md)) == 2:   # never search a past/unknown-year date
         _ask_year(frm, packet, md, None)
         return
+    if _iso_date(packet.stay.check_in) is None or _iso_date(packet.stay.check_out) is None:
+        # Malformed/missing dates must never reach the supplier (a "12-17" check-in
+        # got an HTTP 400 and the guest no rate) -- ask for them instead.
+        print(f"[wa v7] {frm}: dates not usable ({packet.stay.check_in!r} -> {packet.stay.check_out!r}) "
+              f"-- asking instead of searching", flush=True)
+        packet.stay.check_in = packet.stay.check_out = None
+        with _WA_SESSIONS_LOCK:
+            _WA_SESSIONS[frm] = {"state": "awaiting_field", "packet": packet,
+                                  "missing": ["stay.check_in", "stay.check_out"], "intent": None,
+                                  "unproductive_attempts": 0, "last_activity": time.time()}
+        _send_ask(frm, packet, ["stay.check_in", "stay.check_out"], None)
+        return
     if ack:
         wa_send(frm, random.choice(_FETCHING_PHRASES))
     resolution = _resolve(packet) if packet.hotel.name else None
@@ -1282,19 +1294,72 @@ def _assumption_line(packet) -> str:
             f"the exact guests.") if a else ""
 
 
+_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _iso_date(v):
+    """A real date for an ISO string, else None."""
+    from datetime import date
+    if isinstance(v, str) and _ISO_RE.fullmatch(v.strip()):
+        try:
+            return date.fromisoformat(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _pull_month_day_dates(fields: dict):
     """The clarification extractor returns a year-less date as MM-DD (policy:
-    never guess a year). Splits those out so the guest is asked the year with
-    buttons instead of getting a text question with nothing to tap."""
-    ym = {}
+    never guess a year). Returns (fields, year_md):
+
+      both dates year-less     -> pulled out, so the guest is asked the year with
+                                  buttons (year_md = both month-days);
+      ONE year-less, the other full ("17 Dec to 18 Dec 2026") -> the year-less end
+                                  takes the year of the stated one, nudged by a year
+                                  only if that would put check-in after check-out
+                                  (30 Dec -> 2 Jan 2027). That is the guest's own
+                                  statement, not a guess;
+      anything else that is not a real ISO date is dropped, so it can never reach
+      TripJack (live 2026-10-08: check_in "12-17" -> HTTP 400, no rate).
+    """
+    from datetime import date
+    fields = dict(fields)
+    md = {}
     for key, name in (("stay.check_in", "check_in"), ("stay.check_out", "check_out")):
         v = fields.get(key)
         m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", v.strip()) if isinstance(v, str) else None
         if m:
-            ym[name] = (int(m.group(1)), int(m.group(2)))
-    if len(ym) == 2:
-        fields = {k: v for k, v in fields.items() if k not in ("stay.check_in", "stay.check_out")}
-        return fields, ym
+            md[name] = (int(m.group(1)), int(m.group(2)))
+    if len(md) == 2:
+        for k in ("stay.check_in", "stay.check_out"):
+            fields.pop(k, None)
+        return fields, md
+
+    def _make(year, mm_dd):
+        try:
+            return date(year, mm_dd[0], mm_dd[1])
+        except ValueError:
+            return None
+
+    if "check_in" in md:
+        co = _iso_date(fields.get("stay.check_out"))
+        d = _make(co.year, md["check_in"]) if co else None
+        if d and d > co:
+            d = _make(co.year - 1, md["check_in"])
+        fields.pop("stay.check_in", None)
+        if d:
+            fields["stay.check_in"] = d.isoformat()
+    elif "check_out" in md:
+        ci = _iso_date(fields.get("stay.check_in"))
+        d = _make(ci.year, md["check_out"]) if ci else None
+        if d and d <= ci:
+            d = _make(ci.year + 1, md["check_out"])
+        fields.pop("stay.check_out", None)
+        if d:
+            fields["stay.check_out"] = d.isoformat()
+    for k in ("stay.check_in", "stay.check_out"):        # nothing malformed may reach the packet
+        if k in fields and _iso_date(fields[k]) is None:
+            fields.pop(k)
     return fields, {}
 
 

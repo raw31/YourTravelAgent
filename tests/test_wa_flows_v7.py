@@ -1217,3 +1217,53 @@ def test_a_wrong_reply_to_the_room_list_gets_a_nudge_with_something_to_tap(sent)
     kind, body, buttons = sent[-1]
     assert kind == "buttons" and "reply with a number from 1 to 1" in body
     assert [b for b, _ in buttons] == ["show_list_again", "start_new_chat"]
+
+
+# -- live 2026-10-08: check_in "12-17" reached TripJack (HTTP 400) -> no rate ------------
+
+def test_one_year_less_date_takes_the_year_of_the_stated_one():
+    # "17 Dec to 18 Dec 2026": the model returned check_in "12-17", check_out "2026-12-18".
+    f, ym = v7._pull_month_day_dates({"stay.check_in": "12-17", "stay.check_out": "2026-12-18"})
+    assert ym == {} and f == {"stay.check_in": "2026-12-17", "stay.check_out": "2026-12-18"}
+    f, ym = v7._pull_month_day_dates({"stay.check_in": "2026-12-17", "stay.check_out": "12-18"})
+    assert f == {"stay.check_in": "2026-12-17", "stay.check_out": "2026-12-18"}
+
+
+def test_a_stay_over_new_year_gets_the_right_year_on_each_end():
+    f, _ = v7._pull_month_day_dates({"stay.check_in": "12-30", "stay.check_out": "2027-01-02"})
+    assert f["stay.check_in"] == "2026-12-30"                 # not 2027, that would be after check-out
+    f, _ = v7._pull_month_day_dates({"stay.check_in": "2026-12-30", "stay.check_out": "01-02"})
+    assert f["stay.check_out"] == "2027-01-02"
+
+
+def test_a_malformed_date_is_dropped_and_never_reaches_the_packet():
+    f, ym = v7._pull_month_day_dates({"stay.check_in": "tomorrow", "stay.check_out": "2026-12-18", "x": 1})
+    assert "stay.check_in" not in f and f["stay.check_out"] == "2026-12-18" and f["x"] == 1
+    f, _ = v7._pull_month_day_dates({"stay.check_in": "02-30", "stay.check_out": "2026-12-18"})
+    assert "stay.check_in" not in f                            # Feb 30 is not a date
+
+
+def test_mixed_dates_typed_in_a_reply_go_on_to_the_search_with_real_dates(sent, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("yta.extract_llm.extract_clarification_ex",
+                        lambda *a, **kw: ({"stay.check_in": "12-17", "stay.check_out": "2026-12-18"}, None, True))
+    monkeypatch.setattr("yta.web._resolve",
+                        lambda pk: seen.update(ci=pk.stay.check_in, co=pk.stay.check_out) or {"room_map": {"matched": False}})
+    p = _RecPacket(missing=["stay.check_in", "stay.check_out"])
+    p.stay.check_in = p.stay.check_out = None            # a packet that really stores what is added
+    v7._WA_SESSIONS["cust"] = {"state": "awaiting_field", "packet": p,
+                               "missing": ["stay.check_in", "stay.check_out"], "intent": None,
+                               "unproductive_attempts": 0, "last_activity": time.time()}
+    v7.handle_batch("cust", [{"type": "text", "text": "17 dec to 18 dec 2026"}])
+    assert seen == {"ci": "2026-12-17", "co": "2026-12-18"}
+
+
+def test_the_search_is_never_called_with_a_malformed_date(sent, monkeypatch):
+    called = []
+    monkeypatch.setattr("yta.web._resolve", lambda pk: called.append(1) or {})
+    p = _RecPacket()
+    p.stay.check_in, p.stay.check_out = "12-17", "2026-12-18"
+    v7._present_deal("cust", p)
+    assert called == []
+    assert v7._WA_SESSIONS["cust"]["state"] == "awaiting_field"
+    assert sent[-1][1].startswith("📅 *What are your check-in and check-out dates?*")
