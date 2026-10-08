@@ -100,6 +100,43 @@ def _tokens(s: str, drop: set[str]) -> list[str]:
             and len(t) > 1]
 
 
+# Cities that go by more than one name. A guest writes "Bangalore" while the hotel
+# catalog says "Bengaluru": without this, the city filter below kept only the 12
+# hotels that literally say "Bangalore" and threw the right hotel away
+# (live 2026-10-08: "Taj MG road banagalore" -> "couldn't find the hotel").
+_CITY_ALIASES = (
+    {"bengaluru", "bangalore", "banglore", "bangaluru", "bengalooru", "bengluru"},
+    {"mumbai", "bombay"},
+    {"kolkata", "calcutta"},
+    {"chennai", "madras"},
+    {"gurugram", "gurgaon"},
+    {"pune", "poona"},
+    {"mysuru", "mysore"},
+    {"kochi", "cochin"},
+    {"thiruvananthapuram", "trivandrum"},
+    {"vadodara", "baroda"},
+    {"varanasi", "banaras", "benares"},
+    {"prayagraj", "allahabad"},
+    {"puducherry", "pondicherry"},
+    {"mangaluru", "mangalore"},
+    {"kozhikode", "calicut"},
+    {"alappuzha", "alleppey"},
+    {"shimla", "simla"},
+    {"panaji", "panjim"},
+    {"visakhapatnam", "vizag"},
+    {"tiruchirappalli", "trichy"},
+)
+
+
+def _city_forms(city_norm: str) -> set[str]:
+    """The city plus every other name it is known by (single-token cities)."""
+    forms = {city_norm} if city_norm else set()
+    for group in _CITY_ALIASES:
+        if city_norm in group:
+            forms |= group
+    return forms
+
+
 def _tmatch(a: str, b: str) -> bool:
     return a == b or fuzz.ratio(a, b) >= 84
 
@@ -140,9 +177,10 @@ def _city_score(city_norm: str, row) -> float | None:
     if not city_norm:
         return None
     hay = f"{row['region_norm'] or ''} {norm_name(row['hotel_full_name'])}".split()
-    if any(city_norm == h for h in hay):
+    forms = _city_forms(city_norm)
+    if any(f == h for f in forms for h in hay):
         return 1.0
-    return fuzz.token_set_ratio(city_norm, " ".join(hay)) / 100.0
+    return max(fuzz.token_set_ratio(f, " ".join(hay)) for f in forms) / 100.0
 
 
 def _addr_score(addr_norm: str, row) -> float | None:
@@ -269,6 +307,14 @@ def resolve(name: str, *, city: str | None = None, region: str | None = None,
     addr_norm = norm_name(address) if address else ""
     place_tokens = {t for t in _TOK.findall(f"{city_norm} {norm_region(region or '')}")
                     if len(t) > 1}
+    for f in list(place_tokens):
+        place_tokens |= _city_forms(f)
+    # A misspelt city typed INSIDE the hotel name ("Taj MG road banagalore") is place
+    # noise too, not part of the hotel's identity: drop query tokens that are a close
+    # spelling of a known place token.
+    for t in _TOK.findall(q_norm):
+        if len(t) > 3 and t not in place_tokens and any(fuzz.ratio(t, p) >= 84 for p in list(place_tokens)):
+            place_tokens.add(t)
     # distinctive query tokens once the city name is stripped — "Amari Bangkok"
     # in Bangkok reduces to just {"amari"}, which can't pin one property
     q_distinct = _tokens(q_core, place_tokens) or _tokens(q_norm, place_tokens)
@@ -330,8 +376,9 @@ def resolve(name: str, *, city: str | None = None, region: str | None = None,
 
         # L2 — region / city (skip if it would empty the pool)
         if city_norm:
+            forms = _city_forms(city_norm)
             keep = [r for r in rows if any(
-                city_norm == h for h in
+                h in forms for h in
                 f"{r['region_norm'] or ''} {norm_name(r['hotel_full_name'])}".split())]
             if keep and len(keep) < len(rows):
                 rows = keep

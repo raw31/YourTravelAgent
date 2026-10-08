@@ -111,3 +111,65 @@ def test_match_carries_cover_image_through(con):
 def test_match_cover_image_is_none_when_not_set(con):
     r = resolve("The Roseate Ganges", lat=30.13083, lng=78.32700, country="India", con=con)
     assert r.match.cover_image is None
+
+
+# -- live 2026-10-08: "Taj MG road banagalore" -> "couldn't find the hotel" ------------
+
+BLR_FIXTURE = [
+    (11, "u11", "Taj MG Road", "Taj MG Road, Bengaluru", 5.0, 12.9750, 77.6070, "BENGALURU", "India"),
+    (12, "u12", "Taj Bangalore", "Taj Bangalore", 5.0, 12.9700, 77.5900, "BANGALORE", "India"),
+    (13, "u13", "Hotel Bangalore Palace", "Hotel Bangalore Palace", 3.0, 12.9900, 77.5800, "BANGALORE", "India"),
+    (14, "u14", "Taj Mahal Palace", "The Taj Mahal Palace Mumbai", 5.0, 18.9220, 72.8330, "MUMBAI", "India"),
+]
+
+
+@pytest.fixture
+def blr():
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript(SCHEMA.read_text())
+    for (tj, u, name, full, rating, lat, lon, region, country) in BLR_FIXTURE:
+        c.execute(
+            "INSERT INTO tj_hotels (tj_id,unica_id,hotel_name,hotel_full_name,"
+            "name_norm,name_core,rating,lat,lon,region_name,region_norm,"
+            "country_name,country_norm,property_type) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (tj, u, name, full, norm_name(name), core_name(name), rating, lat, lon,
+             region, norm_region(region), country, norm_name(country), "Hotel"))
+    c.execute("INSERT INTO tj_hotels_fts(tj_hotels_fts) VALUES('rebuild')")
+    c.commit()
+    yield c
+    c.close()
+
+
+def test_city_aliases_cover_the_common_renamed_cities():
+    from yta.hoteldb.resolver import _city_forms
+    assert {"bangalore", "bengaluru"} <= _city_forms("bangalore")
+    assert {"mumbai", "bombay"} <= _city_forms("bombay")
+    assert "kolkata" in _city_forms("calcutta") and "gurugram" in _city_forms("gurgaon")
+    assert _city_forms("rishikesh") == {"rishikesh"}                  # unknown cities are untouched
+    assert _city_forms("") == set()
+
+
+def test_a_misspelt_city_inside_the_name_no_longer_hides_the_right_hotel(blr):
+    # The model gave name "Taj MG road banagalore" + city "Bangalore"; the catalog says
+    # "Bengaluru". The city filter kept only the hotels that literally say "Bangalore".
+    r = resolve("Taj MG road banagalore", city="Bangalore", country="India", con=blr)
+    assert r.band in ("high", "medium") and r.match.tj_id == 11
+
+
+def test_the_guests_city_spelling_matches_the_catalogs_spelling(blr):
+    for city in ("Bangalore", "Bengaluru", "Banglore"):
+        r = resolve("Taj MG Road", city=city, country="India", con=blr)
+        assert r.band == "high" and r.match.tj_id == 11, city
+    assert resolve("Taj Mahal Palace", city="Bombay", country="India", con=blr).match.tj_id == 14
+
+
+def test_a_typo_in_the_name_with_no_city_is_still_offered_for_confirmation(blr):
+    r = resolve("Taj MG road banagalore", con=blr)
+    assert r.band in ("high", "medium") and r.match.tj_id == 11        # medium -> the bot asks "Is the hotel ...?"
+
+
+def test_a_hotel_that_does_not_exist_is_still_not_matched_when_the_city_is_aliased(blr):
+    r = resolve("Zzyzx Nowhere Inn", city="Bangalore", country="India", con=blr)
+    assert r.band == "none" and r.match is None
