@@ -120,6 +120,8 @@ BLR_FIXTURE = [
     (12, "u12", "Taj Bangalore", "Taj Bangalore", 5.0, 12.9700, 77.5900, "BANGALORE", "India"),
     (13, "u13", "Hotel Bangalore Palace", "Hotel Bangalore Palace", 3.0, 12.9900, 77.5800, "BANGALORE", "India"),
     (14, "u14", "Taj Mahal Palace", "The Taj Mahal Palace Mumbai", 5.0, 18.9220, 72.8330, "MUMBAI", "India"),
+    (15, "u15", "The LaLiT New Delhi", "The LaLiT New Delhi", 5.0, 28.6320, 77.2190, "NEW DELHI", "India"),
+    (16, "u16", "Lalit hotel", "Lalit hotel", 3.0, 22.5726, 88.3639, "KOLKATA", "India"),
 ]
 
 
@@ -172,4 +174,23 @@ def test_a_typo_in_the_name_with_no_city_is_still_offered_for_confirmation(blr):
 
 def test_a_hotel_that_does_not_exist_is_still_not_matched_when_the_city_is_aliased(blr):
     r = resolve("Zzyzx Nowhere Inn", city="Bangalore", country="India", con=blr)
+    assert r.band == "none" and r.match is None
+
+
+def test_a_typo_in_the_city_field_is_matched_to_the_catalogs_spelling(blr):
+    # "lalit deli": the model may keep the typo as the CITY ("Deli"); that used to fall
+    # through to an unrelated "Lalit hotel" in another city.
+    r = resolve("lalit deli", city="Deli", country="India", con=blr)
+    assert r.match is not None and r.match.tj_id == 15
+    assert any("close to" in l for l in r.layers)
+
+
+def test_lalit_deli_resolves_to_the_delhi_property_however_the_model_split_it(blr):
+    for city in (None, "Delhi", "Deli"):
+        r = resolve("lalit deli", city=city, country="India", con=blr)
+        assert r.match is not None and r.match.tj_id == 15, city
+
+
+def test_city_typo_tolerance_does_not_invent_a_match_for_an_unknown_hotel(blr):
+    r = resolve("Zzyzx Nowhere Inn", city="Deli", country="India", con=blr)
     assert r.band == "none" and r.match is None

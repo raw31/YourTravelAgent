@@ -377,9 +377,20 @@ def resolve(name: str, *, city: str | None = None, region: str | None = None,
         # L2 — region / city (skip if it would empty the pool)
         if city_norm:
             forms = _city_forms(city_norm)
-            keep = [r for r in rows if any(
-                h in forms for h in
-                f"{r['region_norm'] or ''} {norm_name(r['hotel_full_name'])}".split())]
+            hay_of = lambda r: f"{r['region_norm'] or ''} {norm_name(r['hotel_full_name'])}".split()  # noqa: E731
+            if not any(h in forms for r in rows for h in hay_of(r)):
+                # Nobody spells the city that way -- a typo ("deli" for "delhi"). Use
+                # the spelling(s) the catalogue DOES have for a close match, and treat
+                # them (and the typo, wherever it sits in the name) as place noise.
+                near = {h for r in rows for h in hay_of(r)
+                        if len(h) > 3 and len(city_norm) > 3 and fuzz.ratio(city_norm, h) >= 84}
+                if near:
+                    forms = forms | near
+                    layers.append(f"L2 city={city_norm!r}: no exact spelling, close to {sorted(near)}")
+                    place_tokens |= near | {city_norm}
+                    q_distinct = _tokens(q_core, place_tokens) or _tokens(q_norm, place_tokens)
+                    thin_name = len(q_distinct) <= 1
+            keep = [r for r in rows if any(h in forms for h in hay_of(r))]
             if keep and len(keep) < len(rows):
                 rows = keep
                 layers.append(f"L2 city={city_norm!r}: {len(rows)}")
